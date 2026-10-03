@@ -30,6 +30,7 @@ const TOOL_LABEL = {
   http_request: 'Request',
   get_this_app: 'ReadApp',
   update_this_app_settings: 'SaveSettings',
+  check_user_migration: 'CheckMigration',
 };
 
 // A thought summary usually opens with a bold title line; it labels the collapsed block.
@@ -76,7 +77,7 @@ function pendingEntry(a) {
   }).join('');
 }
 
-const PRESET = (protocol) => `Register this app in CloakTail as a ${LABEL[protocol]} application, then fill this app's settings from the result.`;
+const PRESET = (protocol) => `Register this app in CloakTail as a ${LABEL[protocol]} application, fill this app's settings from the result, then set up and check user migration.`;
 
 const textBox = (placeholder) => `<label class="sr-only" for="f-message">Message</label>
   <div class="cc-input"><span class="cc-mark" aria-hidden="true">›</span>
@@ -138,7 +139,7 @@ function chatWindow(a) {
 }
 
 export function assistantCard(a, draft) {
-  const description = `Does steps 2 to 4 for you: an AI agent (Google Gemini, <code>${esc(a.model)}</code>) registers this app in CloakTail as a ${LABEL[a.protocol]} application, using only the CloakTail API reference you give it, then fills the settings below. You approve every change. Or skip it and follow the steps by hand.`;
+  const description = `Does steps 2 to 4 for you, then sets up <a href="/admin/migrate">user migration</a>: an AI agent (Google Gemini, <code>${esc(a.model)}</code>) registers this app in CloakTail as a ${LABEL[a.protocol]} application, using only the CloakTail API reference you give it, and fills this app's settings. You approve every change. Or skip it and follow the steps by hand.`;
   let body;
   if (!a.enabled) {
     body = alert('info', 'The assistant is off', ['Set <code>GEMINI_API_KEY</code> and <code>GEMINI_MODEL</code> in <code>.env</code> and restart to turn it on.']);

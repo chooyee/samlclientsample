@@ -48,7 +48,7 @@ docker run --rm -p 4000:4000 \
 Or pass your `.env` with `--env-file .env`. Settings, profiles, legacy users and key pairs live in the two volumes, so they survive restarts.
 
 - The base URL must be the address the **browser** uses; it sets the entity ID, ACS and redirect URIs. `BASE_URL` is its default; change it in step 1 (**Base URL**) of the SAML or OpenID Connect page (switching between http and https needs a restart, for the session cookie).
-- From inside the container, `localhost` is the container itself. If Keycloak or CloakTail run on the host, use `http://host.docker.internal:<port>` for URLs the app fetches server-side (IdP metadata, OIDC issuer, `CLOAKTAIL_URL`); on Linux add `--add-host=host.docker.internal:host-gateway`. The OIDC issuer must still match what Keycloak puts in its tokens, so set Keycloak's hostname accordingly.
+- From inside the container, `localhost` is the container itself. If Keycloak or CloakTail run on the host, use `http://host.docker.internal:<port>` for URLs the app fetches server-side (IdP metadata, OIDC issuer, CloakTail's migration URL); on Linux add `--add-host=host.docker.internal:host-gateway`. The OIDC issuer must still match what Keycloak puts in its tokens, so set Keycloak's hostname accordingly.
 - The image sets `NODE_ENV=production`, so simulated migration results are refused unless you set `MIGRATION_ACCEPT_SIMULATED=true`.
 
 Settings and key pairs change without editing `.env` or restarting. Invalid input is flagged next to its field and kept in the form.
@@ -197,7 +197,7 @@ Seeded users `alice`, `bob` and `carol` (password `Legacy#2024`) are in `data/le
 | Return URL | `http://localhost:4000/migrate/return` |
 | Request signing | JWKS URL: `http://localhost:4000/migrate/jwks.json` (RS256; `kid` is the key's RFC 7638 thumbprint) |
 
-Then put the migration secret in `.env` as `CLOAKTAIL_MIGRATION_SECRET` and restart. The client ID (`iss`) is the SAML entity ID or OIDC client ID, depending on the protocol chosen on the Migration page. **Check request** and **Simulate result** there call `/migrate/check` and `/migrate/simulate`; a simulated result is opened at the return URL to test each status. **Rotate key** replaces the signing key; CloakTail fetches the JWKS again when it sees a new `kid`.
+Then enter CloakTail's **migration URL** (its request audience and result issuer, e.g. `http://localhost:3000/migrate`) and the **migration secret** under **Settings → From CloakTail** on the Migration page; no restart. They are not read from `.env` (the secret's `.env` default, `CLOAKTAIL_MIGRATION_SECRET`, still works). The **registration assistant** does all of this after registering the app: it sets up migration on the same CloakTail application with this app's return URL and JWKS URL, saves the migration URL and secret here, and checks a request with `/migrate/check`. The client ID (`iss`) is the SAML entity ID or OIDC client ID, depending on the protocol chosen on the Migration page. **Check request** and **Simulate result** there call `/migrate/check` and `/migrate/simulate`; a simulated result is opened at the return URL to test each status. **Rotate key** replaces the signing key; CloakTail fetches the JWKS again when it sees a new `kid`.
 
 ## Running more than one
 

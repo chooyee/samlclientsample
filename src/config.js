@@ -9,7 +9,6 @@ function required(name) {
 const flag = (name, fallback) => (process.env[name] ?? String(fallback)).toLowerCase() === 'true';
 
 const port = Number(process.env.PORT || 4000);
-const cloaktailUrl = (process.env.CLOAKTAIL_URL || 'http://localhost:3000').replace(/\/$/, '');
 
 // The URLs this app registers in CloakTail, all under the base URL: the address the browser uses.
 // The base URL is a setting (see settings.js); BASE_URL is only its default.
@@ -45,10 +44,9 @@ export const config = {
 
   legacyUsersFile: process.env.LEGACY_USERS_FILE || 'data/legacy-users.json',
 
-  // User migration through CloakTail (see /migrate). The secret verifies results (always HS256)
-  // and signs requests when the request signing method is "secret". Never shown, logged or saved.
+  // User migration's URL and secret are settings (see settings.js): they come with the
+  // registration, from CloakTail's migration page or API.
   cloaktail: {
-    migrateUrl: `${cloaktailUrl}/migrate`,
     // Only pre-fills the registration assistant's form: the spec it works from is the URL entered there.
     referenceUrl: process.env.CLOAKTAIL_REFERENCE_URL || '',
   },
@@ -58,7 +56,6 @@ export const config = {
     apiKey: process.env.GEMINI_API_KEY || '',
     model: process.env.GEMINI_MODEL || '',
   },
-  migrationSecret: process.env.CLOAKTAIL_MIGRATION_SECRET || '',
   migrationKeyFile: process.env.MIGRATION_KEY_FILE || 'certs/migration-key.pem',
   // Results from POST /migrate/simulate carry simulated: true. Accepted only while testing.
   acceptSimulated: flag('MIGRATION_ACCEPT_SIMULATED', process.env.NODE_ENV !== 'production'),
@@ -109,4 +106,11 @@ export const envDefaults = {
   migrationRequestSigning: process.env.MIGRATION_REQUEST_SIGNING || 'jwks',
   // Empty: <base URL>/migrate/return.
   migrationReturnUrl: process.env.MIGRATION_RETURN_URL || '',
+  // CloakTail's migration URL: requests' aud and results' iss; /start, /check, /simulate and
+  // /status are under it. Not from .env: it comes with the registration (the API's
+  // endpoints.request_aud_and_result_iss, or the migration page).
+  migrationUrl: '',
+  // Verifies results (always HS256) and signs requests with the "secret" method. Saved here by the
+  // assistant or the Migration page; .env only gives the default.
+  migrationSecret: process.env.CLOAKTAIL_MIGRATION_SECRET || '',
 };

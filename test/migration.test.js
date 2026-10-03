@@ -1,4 +1,4 @@
-// Acceptance tests for user migration (CLOAKTAIL_URL/migrate/spec.md, "Acceptance tests").
+// Acceptance tests for user migration (<migration URL>/spec.md, "Acceptance tests").
 // Runs a throwaway copy of the app with its own data files and drives it like a browser, using
 // CloakTail's /migrate/check and /migrate/simulate, which create no users.
 // Needs CloakTail running and the app's registered JWKS URL (BASE_URL/migrate/jwks.json) reachable:
@@ -13,6 +13,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { config, envDefaults, appUrls } from '../src/config.js';
 import * as migration from '../src/migration.js';
+import { getSettings } from '../src/settings.js';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PASSWORD = 'Legacy#2024';
@@ -27,7 +28,8 @@ const BOB = { id: `t${RUN}b`, username: `bob-${RUN}`, email: `bob-${RUN}@example
 const reachable = (url) => fetch(url, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false);
 
 let skip = false;
-if (!migration.hasSecret()) skip = 'CLOAKTAIL_MIGRATION_SECRET is not set';
+if (!migration.hasUrl()) skip = 'no CloakTail migration URL in the settings (Migration page)';
+else if (!migration.hasSecret()) skip = 'no migration secret in the settings (Migration page)';
 else if (!(await reachable(`${migration.CLOAKTAIL.audience}/spec.md`))) skip = `CloakTail is not reachable at ${migration.CLOAKTAIL.audience}`;
 
 const port = (await reachable(appUrls(envDefaults.baseUrl).jwksUrl)) ? Number(process.env.TEST_PORT || 4100) : config.port;
@@ -52,6 +54,8 @@ function seedUser(u) {
     conflict: null,
   };
 }
+// The test copy has its own settings file: give it this app's CloakTail migration URL and secret.
+fs.writeFileSync(path.join(tmp, 'settings.json'), JSON.stringify({ migrationUrl: getSettings().migrationUrl, migrationSecret: getSettings().migrationSecret }));
 fs.writeFileSync(legacyFile, JSON.stringify({ [ALICE.id]: seedUser(ALICE), [BOB.id]: seedUser(BOB) }, null, 2));
 
 let server;
@@ -125,7 +129,7 @@ async function simulate(token, status) {
 function signResult(claims) {
   const part = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
   const input = `${part({ alg: 'HS256', typ: 'JWT' })}.${part(claims)}`;
-  return `${input}.${crypto.createHmac('sha256', config.migrationSecret).update(input).digest('base64url')}`;
+  return `${input}.${crypto.createHmac('sha256', getSettings().migrationSecret).update(input).digest('base64url')}`;
 }
 
 // The result in url with its claims changed and signed again with the migration secret.
@@ -316,7 +320,7 @@ const api = async (method, url, body) => {
   });
   return { status: res.status, body: res.status === 204 ? null : await res.json() };
 };
-const API = `${config.cloaktail.migrateUrl.replace(/\/migrate$/, '')}/api/v1`;
+const API = `${migration.CLOAKTAIL.audience.replace(/\/migrate$/, '')}/api/v1`;
 for (const file of ['.env.cloaktail']) {
   const p = path.join(ROOT, file);
   if (fs.existsSync(p)) for (const [, k, v] of fs.readFileSync(p, 'utf8').matchAll(/^(CLOAKTAIL_CLIENT_(?:ID|SECRET))=(.*)$/gm)) process.env[k] ??= v.trim();

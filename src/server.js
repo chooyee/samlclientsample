@@ -552,6 +552,27 @@ const conversation = (req, protocol) => {
 };
 
 // What the agent registers: this app's own values for the protocol, and its current settings.
+// User migration, for the assistant: what to register in CloakTail and what is set here.
+function migrationValues(protocol) {
+  const s = getSettings();
+  const m = active.migration;
+  const key = migration.signingKeyStatus().key;
+  return {
+    register_in_cloaktail: {
+      return_url: m.returnUrl,
+      request_signing: s.migrationRequestSigning,
+      jwks_url: m.jwksUrl,
+      jwks_key_id: key?.kid ?? 'no key yet',
+    },
+    request_iss_is_client_id_of: `this app's ${protocol === 'oidc' ? 'OpenID Connect client ID' : 'SAML entity ID'}, once migrationProtocol = "${protocol}"`,
+    current_settings: {
+      migrationUrl: s.migrationUrl, migrationSecret: s.migrationSecret ? 'set' : '', migrationRequestSigning: s.migrationRequestSigning,
+      migrationReturnUrl: s.migrationReturnUrl, migrationProtocol: s.migrationProtocol || 'automatic',
+    },
+    missing_here: migrationProblems(),
+  };
+}
+
 function localValues(protocol) {
   const s = getSettings();
   const { sp, oidc: o } = active;
@@ -575,6 +596,7 @@ function localValues(protocol) {
       encryption_certificate_pem: sp.decryptAssertions ? keys.encryption?.cert ?? 'missing: save the SAML settings to generate one' : 'not in use',
       idp_configured: isConfigured('saml'),
       current_idp_settings: { idpEntityId: s.idpEntityId, idpSsoUrl: s.idpSsoUrl, idpSloUrl: s.idpSloUrl, idpMetadataUrl: s.idpMetadataUrl, idpInitiatedUrl: s.idpInitiatedUrl, idpCert: s.idpCert ? 'pinned' : '' },
+      user_migration: migrationValues('saml'),
     };
   }
   return {
@@ -591,6 +613,7 @@ function localValues(protocol) {
     client_types_supported: 'confidential (client secret) or public (PKCE)',
     configured: isConfigured('oidc'),
     current_settings: { oidcIssuer: s.oidcIssuer, oidcClientId: s.oidcClientId, oidcClientSecret: s.oidcClientSecret ? 'set' : '' },
+    user_migration: migrationValues('oidc'),
   };
 }
 
@@ -623,6 +646,17 @@ function assistantContext(req, protocol) {
       const notes = req.session.flash?.notes ?? [];
       delete req.session.flash;
       return { saved: Object.keys(values), configured: isConfigured(section), notes };
+    },
+    // The Migration page's "Check request", for the first legacy user. Creates no users.
+    checkMigration: async () => {
+      const problems = migrationProblems();
+      if (problems.length) return { ok: false, problems };
+      const user = legacy.listLegacyUsers()[0];
+      if (!user) return { ok: false, problems: ['No legacy users to build a request for.'] };
+      const built = migration.buildRequest(active.migration, user, migration.newState());
+      const answer = await migration.check(built.token);
+      migration.logEvent('check', { user: user.username, detail: answer.body.ok ? 'ok' : answer.body.error?.code });
+      return { ok: Boolean(answer.body.ok), user: user.username, request_claims: built.claims, cloaktail: answer.body };
     },
   };
 }
@@ -844,7 +878,7 @@ app.get('/migrate/return', (req, res, next) => {
       res.redirect('/legacy');
     });
   };
-  if (!migration.hasSecret()) return reject('CLOAKTAIL_MIGRATION_SECRET is not set');
+  if (!migration.hasSecret()) return reject('the migration secret is not set');
 
   let claims;
   try {

@@ -147,10 +147,21 @@ const SETTING_DOCS = {
     oidcUsePkce: ['boolean', 'Send PKCE (S256).'],
     oidcExpectedClaims: ['string', 'Comma-separated claims expected in the ID token or userinfo.'],
   },
+  // User migration, for either protocol: what CloakTail's migration setup returns.
+  migration: {
+    migrationUrl: ['string', 'CloakTail\'s migration URL: endpoints.request_aud_and_result_iss in the migration setup response.'],
+    migrationSecret: ['string', 'Migration secret: pass the [secret:N] handle you received for migration_secret.'],
+    migrationRequestSigning: ['string', 'Request signing as registered: jwks (this app\'s JWKS URL, preferred) or secret.'],
+    migrationReturnUrl: ['string', 'Return URL, exactly as registered. Empty: the default from get_this_app.'],
+    migrationProtocol: ['string', 'saml or oidc: which of this app\'s Keycloak sign-ins migrated users use; its client ID is the iss of migration requests. Set it to the protocol of the application you set migration up on.'],
+  },
 };
 
+// Which settings section each setting is saved in.
+const sectionOf = (protocol, key) => (Object.hasOwn(SETTING_DOCS.migration, key) ? 'migration' : Object.hasOwn(SETTING_DOCS[protocol], key) ? protocol : null);
+
 function declarations(protocol) {
-  const settings = SETTING_DOCS[protocol];
+  const settings = { ...SETTING_DOCS[protocol], ...SETTING_DOCS.migration };
   return [
     {
       name: 'fetch_reference',
@@ -190,11 +201,16 @@ function declarations(protocol) {
     },
     {
       name: 'update_this_app_settings',
-      description: 'Save values CloakTail returned into this app\'s settings, so it can sign users in. Waits for the admin to approve. Give only the settings to change.',
+      description: 'Save values CloakTail returned into this app\'s settings: sign-in settings, and user migration settings (the migration* ones). Waits for the admin to approve. Give only the settings to change.',
       parametersJsonSchema: {
         type: 'object',
         properties: Object.fromEntries(Object.entries(settings).map(([k, [type, description]]) => [k, { type, description }])),
       },
+    },
+    {
+      name: 'check_user_migration',
+      description: 'Check user migration end to end, after its settings are saved here: builds a migration request for a legacy test user exactly as this app would, and sends it to CloakTail\'s /migrate/check. Creates no users. Returns what is still missing here, or CloakTail\'s answer.',
+      parametersJsonSchema: { type: 'object', properties: {} },
     },
   ];
 }
@@ -270,12 +286,28 @@ const tools = {
     return { log: 'Read this app\'s values', response: local(protocol) };
   },
 
+  // Saves each setting in its section: this protocol's, or user migration's.
   async update_this_app_settings(args, { conn, protocol, save }) {
-    const keys = Object.keys(SETTING_DOCS[protocol]);
-    const values = Object.fromEntries(Object.entries(args ?? {}).filter(([k]) => keys.includes(k)).map(([k, v]) => [k, reveal(conn, v)]));
-    if (!Object.keys(values).length) throw new AssistantError(`No known settings given. Known: ${keys.join(', ')}.`);
-    const result = await save(protocol, values);
-    return { log: [`Saved: ${Object.keys(values).join(', ')}`, ...(result.notes ?? [])].join('\n'), response: result };
+    const bySection = {};
+    for (const [k, v] of Object.entries(args ?? {})) {
+      const section = sectionOf(protocol, k);
+      if (section) (bySection[section] ??= {})[k] = reveal(conn, v);
+    }
+    if (!Object.keys(bySection).length) {
+      throw new AssistantError(`No known settings given. Known: ${[...Object.keys(SETTING_DOCS[protocol]), ...Object.keys(SETTING_DOCS.migration)].join(', ')}.`);
+    }
+    const results = {};
+    for (const [section, values] of Object.entries(bySection)) results[section] = await save(section, values);
+    const saved = Object.values(bySection).flatMap(Object.keys);
+    const notes = Object.values(results).flatMap((r) => r.notes ?? []);
+    return { log: [`Saved: ${saved.join(', ')}`, ...notes].join('\n'), response: results };
+  },
+
+  async check_user_migration(args, { checkMigration }) {
+    const result = await checkMigration();
+    const log = result.problems ? `Not ready: ${result.problems.length} thing(s) missing here`
+      : result.ok ? `CloakTail accepted the request for ${result.user}` : `CloakTail refused it: ${result.cloaktail?.error?.code ?? 'error'}`;
+    return { log, response: result };
   },
 };
 
@@ -312,7 +344,7 @@ const PROTOCOL_LABEL = { saml: 'SAML 2.0', oidc: 'OpenID Connect' };
 function systemInstruction(protocol, conn) {
   const label = PROTOCOL_LABEL[protocol];
   return `You are the registration assistant in the admin console of "Test SP", a test application, on its ${label} page.
-Your job: register this app in CloakTail as a ${label} application, or bring an existing registration in line with it, then save the values CloakTail gives back into this app's settings so users can sign in.
+Your job: register this app in CloakTail as a ${label} application, or bring an existing registration in line with it, then save the values CloakTail gives back into this app's settings so users can sign in. Then set up user migration on that same application, so the app's existing users can move to Keycloak.
 
 What you know about CloakTail comes only from the reference the admin gave: ${conn.referenceUrl}
 Read it first with fetch_reference, and follow the documents it points to (for example an OpenAPI description) when you need details. Use only endpoints, fields and values the reference documents; never guess them. If the reference doesn't say how to do something, tell the admin.
@@ -321,9 +353,11 @@ The admin's API credential is held by the server. Find the token endpoint and cl
 
 Call get_this_app for this app's values. Register exactly those (URLs, entity or client ID, switches, certificates); don't invent values. Before creating anything, check whether an application with this app's entity ID or client ID already exists, and update it instead of creating a duplicate. Ask the admin for anything the reference requires that get_this_app doesn't provide (for example an application name), unless they already said.
 
+User migration comes after the registration and its settings are saved. Follow the reference's user migration instructions, on the application you just registered. get_this_app's user_migration lists what to register: the return URL, and request signing with this app's JWKS URL (use jwks unless this app already uses the secret method). Read the existing migration setup first and keep what matches. Then save into this app, in one update_this_app_settings call: migrationUrl (CloakTail's migration URL from the setup response), migrationSecret (the [secret:N] handle of the migration secret), migrationRequestSigning, migrationReturnUrl if it differs from the default, and migrationProtocol = "${protocol}". Finally call check_user_migration and report the result. If the reference documents no migration setup, give the admin these values to enter by hand.
+
 http_request calls that change something (POST, PUT, PATCH, DELETE) and update_this_app_settings wait for the admin's approval. Just before calling one, say in a sentence what it will do. If the admin declines, follow admin_instead when the response has it; otherwise ask what they want instead.
 
-Write short, plain sentences. Your replies are shown as Markdown: use lists for steps and \`code\` for URLs, IDs and field names. When you finish, say what was registered, what was saved here, and anything the admin still has to do.`;
+Write short, plain sentences. Your replies are shown as Markdown: use lists for steps and \`code\` for URLs, IDs and field names. When you finish, say what was registered, whether user migration is set up and checked, what was saved here, and anything the admin still has to do.`;
 }
 
 // Adds the model's thought summary, then its answer, to the transcript.

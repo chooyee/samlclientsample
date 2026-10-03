@@ -40,12 +40,13 @@ function registerCard({ m, keyStatus, hasSecret }) {
   return card({
     step: 1,
     title: 'Register in CloakTail',
-    description: 'In CloakTail, <em>Applications → (this app) → User migration</em>. Enter these values, then copy the migration secret into <code>.env</code>.',
+    description: 'In CloakTail, <em>Applications → (this app) → User migration</em>. Enter these values, then copy CloakTail\'s migration URL and secret into step 2. The registration assistant on the SAML and OpenID Connect pages can do this for you.',
     body: kv([
       ['Client ID (iss)', m.clientId ? `${copyable(m.clientId, 'client ID')}<small>The ${esc(PROTOCOL_LABEL[m.protocol])} ${m.protocol === 'oidc' ? 'client ID' : 'entity ID'}: the application with user migration set up.</small>` : none('Set up the protocol first')],
       ['Return URL', copyable(m.returnUrl, 'return URL')],
       ...signing,
-      ['Migration secret', `${statusBadge(hasSecret, 'Set', 'Not set')}<small>From the migration page, as <code>CLOAKTAIL_MIGRATION_SECRET</code> in <code>.env</code>; restart after changing it. Verifies results${m.requestSigning === 'secret' ? ' and signs requests' : ''}. Never shown here.</small>`],
+      ['CloakTail migration URL', `${m.url ? code(m.url) : statusBadge(false, '', 'Not set')}<small>From CloakTail, in step 2. Requests go to its <code>/start</code>; it is their <code>aud</code>.</small>`],
+      ['Migration secret', `${statusBadge(hasSecret, 'Set', 'Not set')}<small>From CloakTail, in step 2. Verifies results${m.requestSigning === 'secret' ? ' and signs requests' : ''}.</small>`],
     ]),
   });
 }
@@ -83,6 +84,16 @@ function settingsCard({ s, errors, m }) {
     title: 'Settings',
     description: `Match the migration page. Defaults come from <code>.env</code>; saved changes are kept in <code>${esc(config.settingsFile)}</code>.`,
     body: `<form method="post" action="/migrate/settings" novalidate>
+      <fieldset class="fieldset"><legend>From CloakTail</legend>
+        <p>From <em>Applications → (this app) → User migration</em>, or the API's <code>GET /apps/{id}/migration</code> and <code>/migration/secret</code>.</p>
+        <div class="fields">
+          ${field({ name: 'migrationUrl', label: 'Migration URL', type: 'url', value: s.migrationUrl, error: errors.migrationUrl, mono: true,
+            placeholder: 'http://localhost:3000/migrate', hint: 'CloakTail\'s <em>request audience and result issuer</em>. Requests go to its <code>/start</code>; tests use its <code>/check</code> and <code>/simulate</code>.' })}
+          ${field({ name: 'migrationSecret', label: 'Migration secret', type: 'password', value: s.migrationSecret, error: errors.migrationSecret, mono: true,
+            hint: 'Verifies results, and signs requests with the secret method. Kept in the settings file on this machine.',
+            after: `<button type="button" class="btn" data-reveal="f-migrationSecret" aria-pressed="false" aria-label="Show secret">${icon('eye')}</button>` })}
+        </div>
+      </fieldset>
       <fieldset class="fieldset"><legend>Keycloak sign-in for migrated users</legend>
         <p>Also decides the client ID sent as <code>iss</code>. Now: ${esc(PROTOCOL_LABEL[m.protocol])}${m.protocolAuto ? ' (automatic)' : ''}.</p>
         <div class="switches">
@@ -125,7 +136,7 @@ function testCard({ users, check, ready, simulatedAccepted }) {
     step: 3,
     title: 'Test against CloakTail',
     description: '<em>Check</em> validates a request built for the user exactly as <code>/migrate/start</code> would. <em>Simulate</em> gets a signed result with the status you choose and opens the return URL in this browser, to test each branch. Neither creates users or uses up the jti.',
-    body: `${ready ? '' : alert('info', 'Finish steps 1 and 2 first', ['Both calls need a request this app can sign and a client ID.'])}
+    body: `${ready ? '' : alert('info', 'Finish steps 1 and 2 first', ['Both calls need CloakTail\'s migration URL, a request this app can sign and a client ID.'])}
       <form method="post" action="/migrate/test" class="stack">
         <div class="row">
           <label class="sr-only" for="t-user">User</label>
@@ -148,11 +159,12 @@ function usersCard({ users }) {
   const rows = users.map((u) => `<tr>
       <td><div class="row" style="flex-wrap:nowrap"><span class="avatar">${esc(initials(fullName(u) || u.username))}</span>
         <div><div>${esc(fullName(u) || u.username)}</div><code class="small">${esc(u.username)} · id ${esc(u.id)}</code></div></div></td>
-      <td>${migrationBadge(u)}${u.conflict?.detail ? `<div class="small muted">${esc(u.conflict.detail)}</div>` : ''}</td>
+      <td>${migrationBadge(u)}${u.conflict ? `<div class="small muted">${u.conflict.detail ? `${esc(u.conflict.detail)} ` : ''}CloakTail answered this ${time(u.conflict.at)}.
+        Until you retry, this user signs in the old way and isn't sent to CloakTail again. Free the username and email in Keycloak, or link the account in CloakTail, then retry.</div>` : ''}</td>
       <td>${u.keycloakId ? `<code class="small">${esc(u.keycloakId)}</code>` : none('—')}</td>
       <td>${u.migratedAt ? time(u.migratedAt) : none('—')}${u.firstKeycloakSignInAt ? `<div class="small muted">Keycloak sign-in ${time(u.firstKeycloakSignInAt)}</div>` : ''}</td>
       <td>${isMigrated(u) || u.conflict ? `<form class="inline" method="post" action="/migrate/users/${esc(u.id)}/reset" data-confirm="Forget ${esc(u.username)}'s migration? They will be sent to CloakTail again. The Keycloak account is not deleted.">
-        <button class="btn ghost sm">${icon('refresh')}Reset</button></form>` : ''}</td></tr>`).join('');
+        <button class="btn ${u.conflict ? '' : 'ghost '}sm">${icon('refresh')}${u.conflict ? 'Retry migration' : 'Reset'}</button></form>` : ''}</td></tr>`).join('');
   return card({
     id: 'users',
     title: 'Legacy users',
@@ -201,13 +213,13 @@ export function migrationPage(data) {
   const s = fromDraft ? draft.values : settings;
   const errors = fromDraft ? draft.errors ?? {} : {};
   // Check and simulate need only a signable request; Keycloak sign-in isn't involved.
-  const canTest = Boolean(m.clientId && hasSecret && (m.requestSigning !== 'jwks' || data.keyStatus.key));
+  const canTest = Boolean(m.url && m.clientId && hasSecret && (m.requestSigning !== 'jwks' || data.keyStatus.key));
   return layout({
     ...data,
     title: 'Migration',
     body: `
       ${pageHead(`User migration ${statusBadge(!problems.length, 'Ready', 'Not ready')}`,
-        'Move legacy users into Keycloak through CloakTail as they sign in. The protocol: <a href="http://localhost:3000/migrate/spec.md" target="_blank">CloakTail user migration</a>.',
+        `Move legacy users into Keycloak through CloakTail as they sign in. The protocol: ${m.url ? `<a href="${esc(m.url)}/spec.md" target="_blank">CloakTail user migration</a>` : 'CloakTail user migration (its spec is under the migration URL)'}.`,
         `<a class="btn primary" href="/legacy">${icon('landmark')}Open the legacy sign-in</a>`)}
       <div class="stack-lg">
         ${card({ body: flow })}

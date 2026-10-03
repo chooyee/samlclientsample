@@ -8,19 +8,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { config } from './config.js';
+import { getSettings } from './settings.js';
 
 export const STATUSES = ['created', 'already_migrated', 'conflict', 'cancelled', 'expired', 'error'];
+// CloakTail's migration endpoints, from the saved migration URL (it comes with the registration).
+const migrationUrl = () => getSettings().migrationUrl;
 export const CLOAKTAIL = {
-  audience: config.cloaktail.migrateUrl, // request aud and result iss
-  startUrl: `${config.cloaktail.migrateUrl}/start`,
-  checkUrl: `${config.cloaktail.migrateUrl}/check`,
-  simulateUrl: `${config.cloaktail.migrateUrl}/simulate`,
-  statusUrl: `${config.cloaktail.migrateUrl}/status`,
+  get audience() { return migrationUrl(); }, // request aud and result iss
+  get startUrl() { return `${migrationUrl()}/start`; },
+  get checkUrl() { return `${migrationUrl()}/check`; },
+  get simulateUrl() { return `${migrationUrl()}/simulate`; },
+  get statusUrl() { return `${migrationUrl()}/status`; },
 };
 const REQUEST_LIFETIME = 300;
 const CLOCK_SKEW = 60;
 
-export const hasSecret = () => Boolean(config.migrationSecret);
+const secret = () => getSettings().migrationSecret;
+export const hasSecret = () => Boolean(secret());
+export const hasUrl = () => Boolean(migrationUrl());
 
 // ---------- request signing key (JWKS) ----------
 
@@ -82,7 +87,7 @@ export const jwks = () => ({ keys: signingKey ? [signingKey.jwk] : [] });
 // ---------- JWT ----------
 
 const part = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
-const hmac = (input) => crypto.createHmac('sha256', config.migrationSecret).update(input).digest();
+const hmac = (input) => crypto.createHmac('sha256', secret()).update(input).digest();
 
 function sign(header, claims) {
   const input = `${part(header)}.${part(claims)}`;
@@ -95,7 +100,8 @@ function sign(header, claims) {
 // What is missing before this app can send users to CloakTail, as sentences. Empty when ready.
 export function problems(m, { protocolReady }) {
   const out = [];
-  if (!hasSecret()) out.push('Set CLOAKTAIL_MIGRATION_SECRET in .env (from Applications → your app → User migration) and restart. Results can\'t be verified without it.');
+  if (!hasUrl()) out.push('No CloakTail migration URL: enter it in the settings (from Applications → your app → User migration), or let the registration assistant set up migration.');
+  if (!hasSecret()) out.push('No migration secret: enter it in the settings (from Applications → your app → User migration). Results can\'t be verified without it.');
   if (!m.clientId) out.push(`No client ID: set up ${m.protocol === 'oidc' ? 'OpenID Connect' : 'SAML'} first, or choose the other protocol.`);
   if (!protocolReady) out.push(`${m.protocol === 'oidc' ? 'OpenID Connect' : 'SAML'} isn't set up, so migrated users couldn't sign in with Keycloak.`);
   if (m.requestSigning === 'jwks' && !signingKey) out.push(signingKeyError ?? 'No request signing key. Generate one.');

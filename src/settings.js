@@ -156,7 +156,10 @@ export function normalizeMigration(raw) {
   const migrationRequestSigning = text(raw.migrationRequestSigning);
   if (!REQUEST_SIGNING.includes(migrationRequestSigning)) fail('migrationRequestSigning', 'Choose the JWKS URL or the migration secret.');
   const migrationReturnUrl = url('migrationReturnUrl', 'Return URL');
-  return done({ migrationProtocol, migrationRequestSigning, migrationReturnUrl });
+  const migrationUrl = url('migrationUrl', 'Migration URL').replace(/\/+$/, '');
+  const migrationSecret = text(raw.migrationSecret);
+  if (/\s/.test(migrationSecret)) fail('migrationSecret', 'Migration secret must not contain spaces.');
+  return done({ migrationProtocol, migrationRequestSigning, migrationReturnUrl, migrationUrl, migrationSecret });
 }
 
 const NORMALIZE = { saml: normalizeSaml, oidc: normalizeOidc, migration: normalizeMigration };
@@ -164,7 +167,7 @@ const SECTION_KEYS = {
   saml: ['baseUrl', 'idpMetadataUrl', 'idpEntityId', 'idpSsoUrl', 'idpSloUrl', 'idpInitiatedUrl', 'idpCert', 'entityId',
     'nameIdFormat', 'expectedAttributes', 'wantResponseSigned', 'wantAssertionsSigned', 'signRequests', 'decryptAssertions'],
   oidc: ['baseUrl', 'oidcIssuer', 'oidcClientId', 'oidcClientSecret', 'oidcScopes', 'oidcUsePkce', 'oidcExpectedClaims'],
-  migration: ['migrationProtocol', 'migrationRequestSigning', 'migrationReturnUrl'],
+  migration: ['migrationProtocol', 'migrationRequestSigning', 'migrationReturnUrl', 'migrationUrl', 'migrationSecret'],
 };
 
 // Reads the passport-saml example on a SAML application page ("Example: Node.js").
@@ -313,6 +316,7 @@ export function resolve(s = current) {
       returnUrl: s.migrationReturnUrl || urls.migrationReturnUrl,
       defaultReturnUrl: urls.migrationReturnUrl,
       jwksUrl: urls.jwksUrl,
+      url: s.migrationUrl, // CloakTail's; empty until registered
     },
     sp: {
       ...urls.sp,
