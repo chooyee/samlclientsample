@@ -100,6 +100,13 @@ function reveal(conn, value) {
   return value;
 }
 
+const truncate = (text) => (text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}\n[truncated: ${text.length - MAX_TEXT} more characters]` : text);
+
+// Gemini reads any {"$ref": ...} object in a function response as a reference to a response part,
+// and rejects the request; OpenAPI documents are full of them.
+const hasRef = (value) => (Array.isArray(value) ? value.some(hasRef)
+  : value && typeof value === 'object' ? Object.hasOwn(value, '$ref') || Object.values(value).some(hasRef) : false);
+
 function responseForModel(conn, res) {
   const out = { status: res.status, content_type: res.contentType };
   if (res.location) out.location = res.location;
@@ -107,11 +114,9 @@ function responseForModel(conn, res) {
   try {
     body = /json/.test(res.contentType) && res.text ? redact(conn, JSON.parse(res.text)) : undefined;
   } catch { /* not JSON after all */ }
-  if (body !== undefined) out.body = body;
-  else if (res.text) {
-    const text = redactText(conn, res.text);
-    out.text = text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}\n[truncated: ${text.length - MAX_TEXT} more characters]` : text;
-  }
+  if (body !== undefined && hasRef(body)) out.text = truncate(JSON.stringify(body));
+  else if (body !== undefined) out.body = body;
+  else if (res.text) out.text = truncate(redactText(conn, res.text));
   return out;
 }
 
@@ -213,7 +218,7 @@ export function describeCall(call) {
 const tools = {
   async fetch_reference({ url }, { conn }) {
     const res = await request(onReferenceOrigin(conn, url), { headers: { accept: 'text/markdown, application/json, text/plain;q=0.9, */*;q=0.5' } });
-    return { log: `Read ${url} → ${res.status}`, response: { url, ...responseForModel(conn, res) } };
+    return { log: `HTTP ${res.status}, ${res.text.length.toLocaleString('en')} characters`, response: { url, ...responseForModel(conn, res) } };
   },
 
   async get_access_token({ token_url: tokenUrl, client_auth: auth = 'client_secret_basic', scope }, { conn }) {
@@ -235,9 +240,9 @@ const tools = {
     if (res.status === 200 && json?.access_token) {
       conn.token = { value: json.access_token, expiresAt: json.expires_in ? Date.now() + json.expires_in * 1000 : null, scope: json.scope ?? null };
       const { access_token: _, ...rest } = json;
-      return { log: `Got an access token from ${tokenUrl}`, response: { status: 200, ok: true, ...redact(conn, rest), note: 'Token stored; it is attached to http_request from now on.' } };
+      return { log: `Access token obtained${json.expires_in ? `, expires in ${json.expires_in} s` : ''}`, response: { status: 200, ok: true, ...redact(conn, rest), note: 'Token stored; it is attached to http_request from now on.' } };
     }
-    return { log: `Token request to ${tokenUrl} → ${res.status}`, response: responseForModel(conn, res) };
+    return { log: `HTTP ${res.status}: no access token`, response: responseForModel(conn, res) };
   },
 
   async http_request({ method, url, json_body: jsonBody }, { conn }) {
@@ -258,7 +263,7 @@ const tools = {
     const expired = conn.token?.expiresAt && conn.token.expiresAt < Date.now();
     const response = responseForModel(conn, res);
     if (res.status === 401 && expired) response.note = 'The access token has expired: call get_access_token again.';
-    return { log: `${verb} ${url} → ${res.status}`, response };
+    return { log: `HTTP ${res.status}`, response };
   },
 
   async get_this_app(args, { protocol, local }) {
@@ -270,20 +275,30 @@ const tools = {
     const values = Object.fromEntries(Object.entries(args ?? {}).filter(([k]) => keys.includes(k)).map(([k, v]) => [k, reveal(conn, v)]));
     if (!Object.keys(values).length) throw new AssistantError(`No known settings given. Known: ${keys.join(', ')}.`);
     const result = await save(protocol, values);
-    return { log: `Saved ${Object.keys(values).join(', ')}`, response: result };
+    return { log: [`Saved: ${Object.keys(values).join(', ')}`, ...(result.notes ?? [])].join('\n'), response: result };
   },
 };
 
+// What a call acts on, shown next to its name in the transcript.
+function callTarget({ name, args = {} }) {
+  if (name === 'fetch_reference') return String(args.url ?? '');
+  if (name === 'get_access_token') return String(args.token_url ?? '');
+  if (name === 'http_request') return `${String(args.method).toUpperCase()} ${args.url}`;
+  if (name === 'update_this_app_settings') return Object.keys(args).join(', ');
+  return '';
+}
+
 async function runTool(call, ctx) {
+  const entry = { kind: 'tool', name: call.name, target: callTarget(call) };
   try {
     const tool = Object.hasOwn(tools, call.name) ? tools[call.name] : null;
     if (!tool) throw new AssistantError(`Unknown tool ${call.name}.`);
     const { log, response } = await tool(call.args ?? {}, ctx);
-    ctx.state.log.push({ kind: 'tool', text: log });
+    ctx.state.log.push({ ...entry, text: log });
     return response;
   } catch (err) {
     const message = err instanceof AssistantError ? err.message : `${err.cause?.message || err.message}`;
-    ctx.state.log.push({ kind: 'tool', text: `${call.name} failed: ${message}`, bad: true });
+    ctx.state.log.push({ ...entry, text: message, bad: true });
     return { error: message };
   }
 }
@@ -306,13 +321,18 @@ The admin's API credential is held by the server. Find the token endpoint and cl
 
 Call get_this_app for this app's values. Register exactly those (URLs, entity or client ID, switches, certificates); don't invent values. Before creating anything, check whether an application with this app's entity ID or client ID already exists, and update it instead of creating a duplicate. Ask the admin for anything the reference requires that get_this_app doesn't provide (for example an application name), unless they already said.
 
-http_request calls that change something (POST, PUT, PATCH, DELETE) and update_this_app_settings wait for the admin's approval. Just before calling one, say in a sentence what it will do. If the admin declines, ask what they want instead.
+http_request calls that change something (POST, PUT, PATCH, DELETE) and update_this_app_settings wait for the admin's approval. Just before calling one, say in a sentence what it will do. If the admin declines, follow admin_instead when the response has it; otherwise ask what they want instead.
 
-Write short, plain sentences. When you finish, say what was registered, what was saved here, and anything the admin still has to do.`;
+Write short, plain sentences. Your replies are shown as Markdown: use lists for steps and \`code\` for URLs, IDs and field names. When you finish, say what was registered, what was saved here, and anything the admin still has to do.`;
 }
 
+// Adds the model's thought summary, then its answer, to the transcript.
 function addText(state, content) {
-  const text = (content?.parts ?? []).filter((p) => p.text && !p.thought).map((p) => p.text).join('').trim();
+  const parts = content?.parts ?? [];
+  const join = (thought) => parts.filter((p) => p.text && Boolean(p.thought) === thought).map((p) => p.text).join('').trim();
+  const thinking = join(true);
+  const text = join(false);
+  if (thinking) state.log.push({ kind: 'thinking', text: thinking });
   if (text) state.log.push({ kind: 'assistant', text });
 }
 
@@ -325,7 +345,11 @@ async function advance(ctx) {
       res = await gemini().models.generateContent({
         model: config.gemini.model,
         contents: state.contents,
-        config: { systemInstruction: systemInstruction(protocol, conn), tools: [{ functionDeclarations: declarations(protocol) }] },
+        config: {
+          systemInstruction: systemInstruction(protocol, conn),
+          tools: [{ functionDeclarations: declarations(protocol) }],
+          thinkingConfig: { includeThoughts: true }, // thought summaries, shown in the transcript
+        },
       });
     } catch (err) {
       state.log.push({ kind: 'error', text: `Gemini: ${err.message}` });
@@ -372,20 +396,23 @@ export async function send(ctx, message) {
   await advance(ctx);
 }
 
-export async function decide(ctx, approved) {
+// note: when declining, what the admin wants instead (optional); it reaches the model with the refusal.
+export async function decide(ctx, approved, note = '') {
   const { state } = ctx;
   if (!state.pending) return;
   const { calls, responses } = state.pending;
   state.pending = null;
+  const instead = approved ? '' : String(note ?? '').trim();
   for (const call of calls) {
     if (approved) {
       state.log.push({ kind: 'approval', text: `Approved: ${call.title}` });
       responses.push({ call, response: await runTool({ id: call.id, name: call.name, args: call.args }, ctx) });
     } else {
       state.log.push({ kind: 'approval', text: `Declined: ${call.title}`, bad: true });
-      responses.push({ call, response: { error: 'The admin declined this step.' } });
+      responses.push({ call, response: { error: 'The admin declined this step.', ...(instead ? { admin_instead: instead } : {}) } });
     }
   }
+  if (instead) state.log.push({ kind: 'user', text: instead });
   state.contents.push(functionResponses(responses));
   await advance(ctx);
 }

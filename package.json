@@ -17,6 +17,7 @@
     "dotenv": "^18.0.4",
     "express": "^5.2.1",
     "express-session": "^1.19.0",
+    "marked": "^16.4.2",
     "openid-client": "^6.8.8",
     "passport": "^0.7.0",
     "selfsigned": "^5.5.0"

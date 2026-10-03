@@ -5,7 +5,7 @@ import { Strategy as SamlStrategy, ValidateInResponseTo } from '@node-saml/passp
 import { config } from './config.js';
 import { idpCertCallback, loadIdpCerts, clearIdpCertCache } from './idpCerts.js';
 import {
-  getSettings, saveSettings, resetSettings, resolve, isConfigured, parsePortalConfig, parsePortalOidcConfig, SettingsError,
+  getSettings, saveSettings, saveBaseUrl, resetSettings, resolve, isConfigured, parsePortalConfig, parsePortalOidcConfig, SettingsError,
 } from './settings.js';
 import { loadKeyPair, generateKeyPair, isKind, certBase64, KEY_SIZES, VALIDITY_YEARS } from './certs.js';
 import { provision, getProfile, listProfiles, clearProfiles } from './users.js';
@@ -496,6 +496,18 @@ for (const section of ['saml', 'oidc']) {
   });
 }
 
+// The base URL, step 1 on both protocol pages. Every URL registered in CloakTail is under it.
+app.post('/settings/base-url', sameOrigin, async (req, res, next) => {
+  const back = ['/admin/saml', '/admin/oidc'].includes(req.body.back) ? req.body.back : '/admin/saml';
+  try {
+    await applySettings(req, ['saml', 'oidc'], () => saveBaseUrl(req.body), 'Base URL saved. Check the values to register in CloakTail.');
+  } catch (err) {
+    if (!(err instanceof SettingsError)) return next(err);
+    settingsFailed(req, 'base', req.body, err, 'Base URL not saved.');
+  }
+  res.redirect(`${back}#base-url`);
+});
+
 // Fills the SAML settings from the passport-saml example on the application page.
 // Settings the example doesn't name (metadata URL, IdP-initiated link, certificate) are kept.
 app.post('/saml/settings/import', sameOrigin, async (req, res, next) => {
@@ -605,9 +617,12 @@ function assistantContext(req, protocol) {
     protocol,
     conn: req.session.cloaktail,
     local: localValues,
+    // The outcome goes back to the agent and into the transcript, not to a page-top flash.
     save: async (section, values) => {
-      await applySettings(req, [section], () => saveSettings(section, { ...getSettings(), ...values }), 'Settings saved by the registration assistant.');
-      return { saved: Object.keys(values), configured: isConfigured(section), notes: req.session.flash?.notes ?? [] };
+      await applySettings(req, [section], () => saveSettings(section, { ...getSettings(), ...values }), 'Settings saved.');
+      const notes = req.session.flash?.notes ?? [];
+      delete req.session.flash;
+      return { saved: Object.keys(values), configured: isConfigured(section), notes };
     },
   };
 }
@@ -628,8 +643,7 @@ for (const protocol of ['saml', 'oidc']) {
     } catch (err) {
       if (!(err instanceof assistant.AssistantError)) return next(err);
       const { clientSecret, ...values } = req.body; // never echo the secret back into the form
-      req.session.draft = { section: 'assistant', values, errors: err.fields };
-      setFlash(req, 'bad', 'Not connected to CloakTail. Check the highlighted fields.');
+      req.session.draft = { section: 'assistant', values, errors: err.fields }; // shown in the card
     }
     res.redirect(back);
   });
@@ -639,14 +653,14 @@ for (const protocol of ['saml', 'oidc']) {
     try {
       await assistant.send(assistantContext(req, protocol), req.body.preset || req.body.message);
     } catch (err) {
-      setFlash(req, 'bad', err.message);
+      conversation(req, protocol).log.push({ kind: 'error', text: err.message });
     }
     res.redirect(back);
   });
 
   app.post(`/assistant/${protocol}/decide`, sameOrigin, async (req, res) => {
     if (!ready(req, res)) return;
-    await assistant.decide(assistantContext(req, protocol), req.body.decision === 'approve');
+    await assistant.decide(assistantContext(req, protocol), req.body.decision === 'approve', req.body.message);
     res.redirect(back);
   });
 

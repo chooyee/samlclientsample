@@ -26,8 +26,8 @@ The app has two sides:
 | Page | What it's for |
 |---|---|
 | **Overview** (`/admin`) | What the app is, setup status for each part, and what to test |
-| **SAML 2.0** (`/admin/saml`) | Step 1: values to register in CloakTail. Step 2: paste the portal's example. Step 3: settings |
-| **OpenID Connect** (`/admin/oidc`) | The same three steps, plus a connection check of the discovery document |
+| **SAML 2.0** (`/admin/saml`) | Step 1: base URL. Step 2: values to register in CloakTail. Step 3: paste the portal's example. Step 4: settings |
+| **OpenID Connect** (`/admin/oidc`) | The same four steps, plus a connection check of the discovery document |
 | **Migration setup** (`/admin/migrate`) | User migration setup, JWKS, check / simulate, legacy users and activity |
 | **Certificates** (`/admin/certs`) | SAML signing and encryption key pairs |
 | **Local profiles** (`/admin/users`) | Profiles created by JIT provisioning |
@@ -47,7 +47,7 @@ docker run --rm -p 4000:4000 \
 
 Or pass your `.env` with `--env-file .env`. Settings, profiles, legacy users and key pairs live in the two volumes, so they survive restarts.
 
-- The base URL must be the address the **browser** uses; it sets the entity ID, ACS and redirect URIs. `BASE_URL` is its default; change it under **Settings → Base URL** on the SAML or OpenID Connect page (switching between http and https needs a restart, for the session cookie).
+- The base URL must be the address the **browser** uses; it sets the entity ID, ACS and redirect URIs. `BASE_URL` is its default; change it in step 1 (**Base URL**) of the SAML or OpenID Connect page (switching between http and https needs a restart, for the session cookie).
 - From inside the container, `localhost` is the container itself. If Keycloak or CloakTail run on the host, use `http://host.docker.internal:<port>` for URLs the app fetches server-side (IdP metadata, OIDC issuer, `CLOAKTAIL_URL`); on Linux add `--add-host=host.docker.internal:host-gateway`. The OIDC issuer must still match what Keycloak puts in its tokens, so set Keycloak's hostname accordingly.
 - The image sets `NODE_ENV=production`, so simulated migration results are refused unless you set `MIGRATION_ACCEPT_SIMULATED=true`.
 
@@ -65,7 +65,7 @@ Settings and key pairs change without editing `.env` or restarting. Invalid inpu
 | → Single logout URL | Single logout URL (empty: local sign-out only) | `IDP_SLO_URL` |
 | → IdP-initiated login | IdP-initiated login (optional) | `IDP_INITIATED_URL` |
 | → Signing certificate | Signing certificate (optional; empty reads the metadata URL) | `IDP_CERT` |
-| (where this app runs; shared with OpenID Connect) | Base URL | `BASE_URL` |
+| (step 1 of the page; shared with OpenID Connect) | Base URL | `BASE_URL` |
 | Your app (SP) settings → Entity ID | Entity ID | `SP_ENTITY_ID` |
 | → Name ID format | Name ID format (the URN under it) | `NAME_ID_FORMAT` |
 | → Attributes | Expected attributes (missing ones are flagged after sign-in) | `EXPECTED_ATTRIBUTES` |

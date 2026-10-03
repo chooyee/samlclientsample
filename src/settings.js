@@ -273,13 +273,21 @@ export function isConfigured(section, s = current) {
   }
 }
 
-// Saves one section; the other is kept as it is.
-export function saveSettings(section, raw) {
-  const next = { ...current, ...NORMALIZE[section](raw) };
+function write(next) {
   fs.mkdirSync(path.dirname(config.settingsFile), { recursive: true });
   fs.writeFileSync(config.settingsFile, `${JSON.stringify(next, null, 2)}\n`);
   current = next;
   return current;
+}
+
+// Saves one section; the other is kept as it is. The base URL has its own form, so a section
+// saved without one keeps the current base URL.
+export const saveSettings = (section, raw) => write({ ...current, ...NORMALIZE[section]({ baseUrl: resolve().baseUrl, ...raw }) });
+
+// Saves the base URL alone. It is shared by SAML, OpenID Connect and user migration.
+export function saveBaseUrl(raw) {
+  const { baseUrl, done } = collector(raw);
+  return write({ ...current, ...done({ baseUrl: baseUrl() }) });
 }
 
 export function resetSettings() {

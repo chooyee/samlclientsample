@@ -1,5 +1,6 @@
 // Admin console pages: overview, SAML and OIDC setup, certificates, local profiles.
 // Customers never see these; their pages are in customer.js.
+import { createHash } from 'node:crypto';
 import { config } from '../config.js';
 import { NAME_ID_FORMATS, isCustomized } from '../settings.js';
 import { assistantCard } from './assistant.js';
@@ -11,6 +12,10 @@ import {
 
 const onOff = (v) => (v ? badge('On', 'ok') : badge('Off'));
 const protoIcon = (p) => `<span class="proto-icon ${p}">${icon(p === 'oidc' ? 'globe' : 'shield')}</span>`;
+
+// Fingerprint of the saved settings. The assistant's chat updates in place; when this changes
+// (it saved settings), the page swaps in the other cards too.
+const settingsRev = (settings) => createHash('sha1').update(JSON.stringify(settings)).digest('hex').slice(0, 12);
 
 // The values a setup form shows: the rejected input after a failed save, else the settings.
 function formState(draft, section, settings) {
@@ -24,11 +29,23 @@ const resetForm = (back) => (isCustomized()
       <input type="hidden" name="back" value="${back}"><button class="btn ghost sm">${icon('refresh')}Reset to .env values</button></form>`
   : '');
 
-// Shared by the SAML and OIDC settings: saving either changes it for both.
-const baseUrlField = (s, errors) => field({
-  name: 'baseUrl', label: 'Base URL', type: 'url', value: s.baseUrl, error: errors.baseUrl, required: true, mono: true,
-  hint: 'The address the browser uses for this app. Every URL to register in CloakTail is under it, for SAML, OpenID Connect and user migration alike.',
-});
+// Step 1 on both protocol pages: every value to register in CloakTail is built from it, so it
+// comes first and saves on its own. Shared by SAML, OpenID Connect and user migration.
+function baseUrlCard({ active, draft }, back) {
+  const { values, errors } = formState(draft, 'base', { baseUrl: active.baseUrl });
+  return card({
+    id: 'base-url',
+    step: 1,
+    title: 'Check where this app runs',
+    description: 'The address the browser uses to open this app. Every URL in step 2 is built from it, so set it before registering. It applies to SAML, OpenID Connect and user migration.',
+    body: `<form method="post" action="/settings/base-url" novalidate>
+      <input type="hidden" name="back" value="${back}">
+      ${field({ name: 'baseUrl', label: 'Base URL', type: 'url', value: values.baseUrl, error: errors.baseUrl, required: true, mono: true,
+        after: '<button class="btn">Save</button>',
+        hint: 'For example <code>http://localhost:4000</code>, or the public address when behind a proxy. Switching between http and https needs a restart.' })}
+    </form>`,
+  });
+}
 
 function importCard({ section, step, action, title, description, placeholder, draft }) {
   const { values, errors } = formState(draft, `${section}-import`, {});
@@ -138,7 +155,7 @@ export function samlPage(data) {
   const { values: s, errors } = formState(draft, 'saml', settings);
 
   const register = card({
-    step: 1,
+    step: 2,
     title: 'Register this app in CloakTail',
     description: 'In CloakTail, <em>Applications → New application → SAML</em>. Fill the form with these values, or import the metadata.',
     body: `${kv([
@@ -161,15 +178,15 @@ export function samlPage(data) {
 
   const importer = importCard({
     section: 'saml',
-    step: 2,
+    step: 3,
     action: '/saml/settings/import',
     title: 'Paste the example from the application page',
-    description: 'The quickest way to fill step 3. Copy the <em>Example: Node.js (@node-saml/passport-saml)</em> block. It fills the SSO and logout URLs, both entity IDs, the Name ID format and the signing and encryption switches; copy the rest by hand.',
+    description: 'The quickest way to fill step 4. Copy the <em>Example: Node.js (@node-saml/passport-saml)</em> block. It fills the SSO and logout URLs, both entity IDs, the Name ID format and the signing and encryption switches; copy the rest by hand.',
     placeholder: "passport.use('saml', new SamlStrategy({ entryPoint: ... }))",
     draft,
   });
 
-  const form = `<form method="post" action="/saml/settings" novalidate>
+  const form = `<form method="post" action="/saml/settings" novalidate data-rev="${settingsRev(settings)}">
     <fieldset class="fieldset"><legend>Keycloak (IdP) details</legend>
       <p>From the application page, <em>Keycloak (IdP) details</em>.</p>
       <div class="fields">
@@ -188,7 +205,6 @@ export function samlPage(data) {
     <fieldset class="fieldset"><legend>Your app (SP)</legend>
       <p>From the application page, <em>Your app (SP) settings</em>.</p>
       <div class="fields">
-        ${baseUrlField(s, errors)}
         ${field({ name: 'entityId', label: 'Entity ID', value: s.entityId, error: errors.entityId, optional: true, mono: true,
           placeholder: sp.defaultEntityId, hint: 'Becomes the Keycloak client ID. Empty uses the default shown.' })}
         ${field({ name: 'nameIdFormat', label: 'Name ID format', value: s.nameIdFormat, error: errors.nameIdFormat, optional: true, mono: true,
@@ -218,10 +234,11 @@ export function samlPage(data) {
       ${pageHead(`SAML 2.0 ${statusBadge(ready.saml)}`, 'Test a SAML application registered in CloakTail. Every value here comes from, or goes to, the application page.',
         `${resetForm('/admin/saml')}${ready.saml ? `<a class="btn primary" href="/?via=saml">${icon('landmark')}Test on the bank sign-in</a>` : ''}`)}
       <div class="stack-lg">
+        ${baseUrlCard(data, '/admin/saml')}
         ${assistantCard(data.assistant, draft)}
         ${register}
         ${importer}
-        ${card({ id: 'settings', step: 3, title: 'Settings', description: `Defaults come from <code>.env</code>; saved changes are kept in <code>${esc(config.settingsFile)}</code>.`, body: form })}
+        ${card({ id: 'settings', step: 4, title: 'Settings', description: `Defaults come from <code>.env</code>; saved changes are kept in <code>${esc(config.settingsFile)}</code>.`, body: form })}
       </div>`,
   });
 }
@@ -255,9 +272,9 @@ export function oidcPage(data) {
   const { values: s, errors } = formState(draft, 'oidc', settings);
 
   const register = card({
-    step: 1,
+    step: 2,
     title: 'Register this app in CloakTail',
-    description: 'In CloakTail, <em>Applications → New application → OpenID Connect</em>. Either client type works: a confidential client needs its secret in step 3; a public client has none and uses PKCE.',
+    description: 'In CloakTail, <em>Applications → New application → OpenID Connect</em>. Either client type works: a confidential client needs its secret in step 4; a public client has none and uses PKCE.',
     body: `${kv([
       ['Redirect URI', copyable(oidc.redirectUri, 'redirect URI')],
       ['Post-logout redirect URI', copyable(oidc.postLogoutRedirectUri, 'post-logout redirect URI')],
@@ -274,7 +291,7 @@ export function oidcPage(data) {
 
   const importer = importCard({
     section: 'oidc',
-    step: 2,
+    step: 3,
     action: '/oidc/settings/import',
     title: 'Paste the example from the application page',
     description: 'Copy the <em>Example code → Node.js</em> block (openid-client). It fills the issuer, client ID, client type, scopes and PKCE. The client secret is never in it.',
@@ -282,11 +299,7 @@ export function oidcPage(data) {
     draft,
   });
 
-  const form = `<form method="post" action="/oidc/settings" novalidate>
-    <fieldset class="fieldset"><legend>Your app</legend>
-      <p>Where this app runs. The URLs in step 1 are under it.</p>
-      <div class="fields">${baseUrlField(s, errors)}</div>
-    </fieldset>
+  const form = `<form method="post" action="/oidc/settings" novalidate data-rev="${settingsRev(settings)}">
     <fieldset class="fieldset"><legend>Keycloak (OpenID provider)</legend>
       <p>From the application page, <em>Keycloak (OpenID provider) details</em>. Everything else is read from the discovery document.</p>
       <div class="fields">
@@ -324,10 +337,11 @@ export function oidcPage(data) {
       ${pageHead(`OpenID Connect ${statusBadge(ready.oidc)}`, 'Test an OpenID Connect application registered in CloakTail, as the portal\'s Node.js example does: issuer, client ID and secret are all the app is given.',
         `${resetForm('/admin/oidc')}${ready.oidc ? `<a class="btn primary" href="/?via=oidc">${icon('landmark')}Test on the bank sign-in</a>` : ''}`)}
       <div class="stack-lg">
+        ${baseUrlCard(data, '/admin/oidc')}
         ${assistantCard(data.assistant, draft)}
         ${register}
         ${importer}
-        ${card({ id: 'settings', step: 3, title: 'Settings', description: `Defaults come from <code>.env</code>; saved changes are kept in <code>${esc(config.settingsFile)}</code>.`, body: form })}
+        ${card({ id: 'settings', step: 4, title: 'Settings', description: `Defaults come from <code>.env</code>; saved changes are kept in <code>${esc(config.settingsFile)}</code>.`, body: form })}
         ${discoveryCard(discovery, ready.oidc)}
       </div>`,
   });

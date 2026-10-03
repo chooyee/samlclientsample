@@ -309,16 +309,70 @@ details.more[open] > summary { margin-bottom: 12px; }
 @media (max-width: 600px) { .setup-list li { grid-template-columns: 36px minmax(0, 1fr); } .setup-list li > .btn { grid-column: 2; justify-self: start; } }
 
 /* Registration assistant */
-.chat { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
-.msg { display: grid; gap: 2px; }
-.msg .who { font-size: 12px; font-weight: 600; color: var(--muted); }
-.msg .text { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); }
-.msg.user .text { background: var(--accent-soft); }
-.msg.note { display: flex; align-items: flex-start; gap: 6px; font-size: 12.5px; color: var(--muted); font-family: var(--mono); overflow-wrap: anywhere; }
-.msg.note .icon { width: 14px; height: 14px; margin-top: 2px; }
-.msg.note.bad { color: var(--bad); }
-.pending { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--warn); border-radius: 10px; }
-.pending-call { display: grid; gap: 8px; overflow-wrap: anywhere; }
+/* transcript, Claude Code style: a gutter mark per entry, tool rows in mono with a result line */
+.cc-window { display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface-2); overflow: hidden; }
+.cc-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; padding: 8px 8px 8px 14px; border-bottom: 1px solid var(--line); background: var(--surface); font-size: 13px; }
+.cc-status-info { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; color: var(--muted); }
+.cc-status-info a { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.cc-status-info .icon { width: 13px; height: 13px; }
+.cc-log { list-style: none; margin: 0; padding: 16px; display: grid; align-content: start; gap: 14px; min-height: 160px; max-height: 620px; overflow-y: auto; }
+.cc-log.cc-empty { display: grid; place-items: center; text-align: center; }
+.cc-log.cc-empty p { max-width: 52ch; margin: 0; }
+.cc-ask .cc-mark { color: var(--warn); font-size: 11px; }
+.cc-ask .cc-body { display: grid; gap: 8px; }
+.cc-ask .cc-result { color: var(--warn); }
+.cc-ask.done .cc-mark, .cc-ask.done .cc-result { color: var(--ok); }
+.cc-ask.bad .cc-mark, .cc-ask.bad .cc-result { color: var(--bad); }
+.cc-composer.cc-decide { border-top: 2px solid var(--warn); background: var(--warn-soft); }
+.cc-decide-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.cc-decide-head strong { margin-right: 8px; }
+[aria-busy="true"] .cc-composer { opacity: .6; }
+.cc-composer button:disabled, .cc-head button:disabled { cursor: default; opacity: .55; }
+.cc-input textarea:disabled { cursor: default; }
+.cc-log > li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 6px; align-items: start; }
+.cc-mark { font-family: var(--mono); line-height: 22px; text-align: center; color: var(--muted); user-select: none; }
+.cc-body { min-width: 0; overflow-wrap: anywhere; line-height: 22px; }
+.cc-user .cc-body { white-space: pre-wrap; padding: 6px 10px; margin: -6px 0; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); }
+.cc-user .cc-mark { color: var(--accent); font-weight: 700; }
+.cc-reply .cc-mark { color: var(--fg); font-size: 11px; }
+.cc-tool .cc-mark { color: var(--ok); font-size: 11px; }
+.cc-tool.bad .cc-mark, .cc-tool.bad .cc-result { color: var(--bad); }
+.cc-call { font-family: var(--mono); font-size: 12.5px; }
+.cc-call strong { font-weight: 700; }
+.cc-result { display: flex; gap: 8px; font-family: var(--mono); font-size: 12.5px; color: var(--muted); white-space: pre-wrap; }
+.cc-live .cc-body { color: var(--muted); font-style: italic; }
+.cc-live .cc-mark { color: var(--warn); animation: cc-pulse 1.2s ease-in-out infinite; }
+@keyframes cc-pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .cc-live .cc-mark { animation: none; } }
+.cc-thinking .cc-mark { color: var(--warn); }
+.cc-thinking summary { cursor: pointer; color: var(--muted); font-style: italic; list-style: none; }
+.cc-thinking summary::-webkit-details-marker { display: none; }
+.cc-thinking summary::after { content: " ▸"; font-style: normal; font-size: 11px; }
+.cc-thinking details[open] summary::after { content: " ▾"; }
+.cc-thinking .md { margin-top: 6px; padding-left: 10px; border-left: 2px solid var(--line-strong); color: var(--muted); font-size: 13px; }
+.cc-empty { margin: 0; color: var(--muted); }
+.cc-composer { display: grid; gap: 8px; padding: 12px; border-top: 1px solid var(--line); background: var(--surface); }
+.cc-input { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 6px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); }
+.cc-input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.cc-input .cc-mark { color: var(--accent); font-weight: 700; }
+.cc-input textarea { border: 0; outline: none; resize: vertical; min-height: 44px; padding: 0; background: transparent; color: var(--fg); font: inherit; line-height: 22px; }
+.cc-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* rendered Markdown */
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md pre, .md table, .md blockquote { margin: 0 0 10px; }
+.md ul, .md ol { padding-left: 22px; }
+.md li + li { margin-top: 2px; }
+.md h1, .md h2, .md h3, .md h4 { margin: 14px 0 6px; font-size: 14px; }
+.md code { padding: 1px 5px; border-radius: 5px; background: var(--surface); border: 1px solid var(--line); overflow-wrap: anywhere; }
+.md pre { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow-x: auto; line-height: 1.5; }
+.md pre code { padding: 0; border: 0; background: none; }
+.md blockquote { padding-left: 10px; border-left: 3px solid var(--line-strong); color: var(--muted); }
+.md table { display: block; overflow-x: auto; border-collapse: collapse; font-size: 13px; }
+.md th, .md td { padding: 5px 10px; border: 1px solid var(--line); }
+.md th { background: var(--surface); }
+.md hr { border: 0; height: 1px; background: var(--line); margin: 12px 0; }
 `;
 
 // ---------- client script: copy, tabs, confirm, relative times, show secret ----------
@@ -350,8 +404,14 @@ export const script = `
   document.addEventListener('submit', (e) => {
     const msg = e.target.dataset.confirm;
     if (msg && !confirm(msg)) return e.preventDefault();
-    // Slow posts (the assistant): show progress and stop double submits. Disabled after the
-    // submit, so the clicked button's value is still sent.
+    // The assistant's forms post in the background and update the card in place (sendChat below).
+    if (e.target.matches('[data-chat]') && window.fetch && window.DOMParser) {
+      e.preventDefault();
+      sendChat(e.target, e.submitter);
+      return;
+    }
+    // Other slow posts: show progress and stop double submits. Disabled after the submit, so the
+    // clicked button's value is still sent.
     const busy = e.target.dataset.busy;
     if (busy) {
       const by = e.submitter;
@@ -360,6 +420,14 @@ export const script = `
         if (by) by.textContent = busy;
       });
     }
+  });
+
+  // Assistant composer: Enter sends, Shift+Enter adds a line.
+  document.addEventListener('keydown', (e) => {
+    const box = e.target.closest?.('textarea[data-enter-submits]');
+    if (!box || e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+    e.preventDefault();
+    if (box.value.trim()) box.form.requestSubmit();
   });
 
   for (const tabs of document.querySelectorAll('[data-tabs]')) {
@@ -401,6 +469,134 @@ export const script = `
   };
   relative();
   setInterval(relative, 30000);
+
+  // ---------- assistant chat ----------
+  // Posts in the background so the page never reloads. Straight away: the card locks (no double
+  // sends or second clicks), the box clears, and the message and a working row join the
+  // transcript. Then the card from the server replaces it; if the assistant saved settings
+  // (the settings form's data-rev changed), the rest of the page is swapped in too.
+
+  const transcript = (card) => {
+    const log = card.querySelector('.cc-log');
+    if (!log || log.tagName === 'OL') return log;
+    const ol = document.createElement('ol');
+    ol.className = 'cc-log';
+    log.replaceWith(ol);
+    return ol;
+  };
+
+  const addRow = (log, cls, mark, text) => {
+    const li = document.createElement('li');
+    li.className = cls;
+    li.innerHTML = '<span class="cc-mark" aria-hidden="true"></span><div class="cc-body"></div>';
+    li.firstChild.textContent = mark;
+    li.lastChild.textContent = text;
+    log.append(li);
+    log.scrollTop = log.scrollHeight;
+    return li;
+  };
+
+  // Send stays off until there is something to send.
+  const syncSend = (root) => {
+    for (const btn of root.querySelectorAll('button[data-needs-text]')) {
+      const box = btn.form && btn.form.elements.message;
+      btn.disabled = !box || !box.value.trim();
+    }
+  };
+  document.addEventListener('input', (e) => { if (e.target.form) syncSend(e.target.form); });
+
+  const settle = () => {
+    const card = document.getElementById('assistant');
+    if (!card) return;
+    for (const log of card.querySelectorAll('.cc-log')) log.scrollTop = log.scrollHeight;
+    syncSend(card);
+    relative();
+    const next = card.querySelector('.cc-decide button[value="approve"]') || card.querySelector('#f-message') || card.querySelector('.field.invalid .input');
+    if (next) next.focus({ preventScroll: true });
+    const win = card.querySelector('.cc-window');
+    if (win) win.scrollIntoView({ block: 'nearest' });
+  };
+
+  function swapIn(doc) {
+    const next = doc.getElementById('assistant');
+    const main = document.querySelector('main');
+    if (!next || !main) return location.reload();
+    const rev = (d) => d.querySelector('#settings form')?.dataset.rev;
+    if (rev(doc) !== rev(document)) {
+      const y = window.scrollY;
+      main.replaceWith(doc.querySelector('main'));
+      const nav = doc.querySelector('.nav');
+      if (nav) document.querySelector('.nav')?.replaceWith(nav);
+      window.scrollTo(0, y);
+    } else {
+      document.getElementById('assistant').replaceWith(next);
+    }
+    settle();
+  }
+
+  async function sendChat(form, submitter) {
+    const card = form.closest('#assistant');
+    if (!card) return form.submit();
+    if (card.getAttribute('aria-busy') === 'true') return;
+    const box = form.elements.message;
+    const typed = box ? box.value.trim() : '';
+    const decision = submitter && submitter.name === 'decision' ? submitter.value : form.matches('.cc-decide') ? 'decline' : '';
+    const preset = submitter && submitter.name === 'preset' ? submitter.value : '';
+    if (box && !typed && !decision && !preset) return box.focus();
+
+    const body = new URLSearchParams(new FormData(form, submitter));
+    if (decision) body.set('decision', decision);
+    if (decision === 'approve') body.delete('message');
+
+    // Lock the card at once.
+    card.setAttribute('aria-busy', 'true');
+    const controls = [...card.querySelectorAll('button, input, textarea, select')].filter((c) => !c.disabled);
+    for (const c of controls) c.disabled = true;
+    const label = submitter && submitter.innerHTML;
+    if (submitter && form.dataset.busy) submitter.textContent = form.dataset.busy;
+    if (box) box.value = '';
+
+    const log = card.querySelector('.cc-window') ? transcript(card) : null;
+    const added = [];
+    let timer = null;
+    if (log) {
+      if (decision) {
+        for (const r of log.querySelectorAll('.cc-ask .cc-result')) {
+          r.lastChild.textContent = decision === 'approve' ? 'Approved' : 'Declined';
+          r.closest('.cc-ask').classList.add(decision === 'approve' ? 'done' : 'bad');
+        }
+      }
+      const said = decision === 'approve' ? '' : typed || preset;
+      if (said) added.push(addRow(log, 'cc-user', '›', said));
+      const busy = form.dataset.busy || 'Working…';
+      const live = addRow(log, 'cc-live', '✻', busy);
+      added.push(live);
+      const start = Date.now();
+      timer = setInterval(() => { live.lastChild.textContent = busy + ' ' + Math.round((Date.now() - start) / 1000) + 's'; }, 1000);
+    }
+
+    try {
+      const res = await fetch(form.action, { method: 'POST', body, credentials: 'same-origin' });
+      if (!res.ok) throw new Error('the server answered ' + res.status);
+      swapIn(new DOMParser().parseFromString(await res.text(), 'text/html'));
+    } catch (err) {
+      // Put everything back, so nothing typed is lost, and say what happened in the transcript.
+      for (const row of added) row.remove();
+      if (box) box.value = typed;
+      for (const c of controls) c.disabled = false;
+      if (submitter && label) submitter.innerHTML = label;
+      card.removeAttribute('aria-busy');
+      const why = err instanceof TypeError ? 'this app\\'s server could not be reached' : err.message;
+      if (log) addRow(log, 'cc-tool bad', '!', 'Not sent: ' + why + '. Your message is back in the box; try again.');
+      else alert('Not sent: ' + why + '.');
+      syncSend(card);
+    } finally {
+      clearInterval(timer);
+    }
+  }
+
+  syncSend(document);
+  for (const log of document.querySelectorAll('.cc-log')) log.scrollTop = log.scrollHeight;
 })();
 `;
 
