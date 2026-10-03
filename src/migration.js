@@ -1,7 +1,7 @@
 // User migration through CloakTail (http://localhost:3000/migrate/spec.md).
 //
 // Request: a JWT this app signs on the server, saying who the user is. Signed with the app's own
-// RSA key (RS256, kid = the key's RFC 7638 thumbprint), published at config.jwksUrl, or with the
+// RSA key (RS256, kid = the key's RFC 7638 thumbprint), published at <base URL>/migrate/jwks.json, or with the
 // migration secret (HS256). Result: a JWT CloakTail signs with HS256 and the migration secret.
 // The secret and private key never leave the server and are never logged.
 import fs from 'node:fs';

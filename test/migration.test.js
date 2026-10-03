@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { config } from '../src/config.js';
+import { config, envDefaults, appUrls } from '../src/config.js';
 import * as migration from '../src/migration.js';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -30,7 +30,7 @@ let skip = false;
 if (!migration.hasSecret()) skip = 'CLOAKTAIL_MIGRATION_SECRET is not set';
 else if (!(await reachable(`${migration.CLOAKTAIL.audience}/spec.md`))) skip = `CloakTail is not reachable at ${migration.CLOAKTAIL.audience}`;
 
-const port = (await reachable(config.jwksUrl)) ? Number(process.env.TEST_PORT || 4100) : config.port;
+const port = (await reachable(appUrls(envDefaults.baseUrl).jwksUrl)) ? Number(process.env.TEST_PORT || 4100) : config.port;
 const base = `http://localhost:${port}`;
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'testsp-'));
 const legacyFile = path.join(tmp, 'legacy-users.json');

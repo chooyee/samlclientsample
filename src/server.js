@@ -12,6 +12,7 @@ import { provision, getProfile, listProfiles, clearProfiles } from './users.js';
 import * as oidc from './oidc.js';
 import * as migration from './migration.js';
 import * as legacy from './legacyUsers.js';
+import * as assistant from './assistant.js';
 import { adminHomePage, samlPage, oidcPage, certsPage, usersPage } from './views/pages.js';
 import { migrationPage } from './views/migration.js';
 import { homePage, legacyPage, redirectToCloakTail, errorPage } from './views/customer.js';
@@ -118,11 +119,11 @@ function logoutVerify(req, profile, done) {
 }
 
 let strategy;
-let active; // { sp, idp, oidc, signing, encryption } the app is running with
+let active; // { baseUrl, sp, idp, oidc, migration, signing, encryption } the app is running with
 
 // (Re)creates the strategies from the current settings and key pairs.
 function buildStrategies() {
-  const { sp, idp, oidc: oidcSettings, migration: migrationSettings } = resolve();
+  const { baseUrl, sp, idp, oidc: oidcSettings, migration: migrationSettings } = resolve();
   const signing = sp.signRequests ? keys.signing : null;
   const encryption = sp.decryptAssertions ? keys.encryption : null;
   const samlOptions = {
@@ -153,7 +154,7 @@ function buildStrategies() {
   passport.use('saml', strategy);
   // Same settings with ForceAuthn, so "sign in as someone else" always shows Keycloak's form.
   passport.use('saml-force', new SamlStrategy({ ...samlOptions, forceAuthn: true }, signOnVerify, logoutVerify));
-  active = { sp, idp, oidc: oidcSettings, migration: migrationSettings, signing, encryption };
+  active = { baseUrl, sp, idp, oidc: oidcSettings, migration: migrationSettings, signing, encryption };
 }
 
 passport.serializeUser((user, done) => done(null, user));
@@ -178,7 +179,8 @@ app.use(session({
   store: sessionStore,
   resave: false,
   saveUninitialized: false,
-  cookie: { httpOnly: true, sameSite: 'lax', secure: config.secureCookies, maxAge: 8 * 60 * 60 * 1000 },
+  // Set from the base URL at startup: switching it between http and https needs a restart.
+  cookie: { httpOnly: true, sameSite: 'lax', secure: active.baseUrl.startsWith('https://'), maxAge: 8 * 60 * 60 * 1000 },
 }));
 app.use(passport.session());
 
@@ -221,10 +223,10 @@ app.get('/', (req, res) => render(req, res, homePage, { profile: getProfile(req.
 // Admin console: everything that changes how the app signs customers in.
 app.get('/admin', (req, res) => render(req, res, adminHomePage, { keys, profileCount: listProfiles().length }));
 
-app.get('/admin/saml', (req, res) => render(req, res, samlPage, { settings: getSettings(), keys }));
+app.get('/admin/saml', (req, res) => render(req, res, samlPage, { settings: getSettings(), keys, assistant: assistantView(req, 'saml') }));
 
 app.get('/admin/oidc', async (req, res) => {
-  render(req, res, oidcPage, { settings: getSettings(), discovery: await oidc.discoveryStatus(active.oidc) });
+  render(req, res, oidcPage, { settings: getSettings(), discovery: await oidc.discoveryStatus(active.oidc), assistant: assistantView(req, 'oidc') });
 });
 
 app.get('/admin/certs', (req, res) => render(req, res, certsPage, { keys, keyErrors }));
@@ -338,7 +340,7 @@ app.get('/oidc/callback', async (req, res, next) => {
 
   let user;
   try {
-    user = await oidc.finishSignIn(active.oidc, new URL(req.originalUrl, config.baseUrl), pending);
+    user = await oidc.finishSignIn(active.oidc, new URL(req.originalUrl, active.baseUrl), pending);
   } catch (err) {
     return fail(oidc.describeError(err));
   }
@@ -527,6 +529,138 @@ app.post('/settings/reset', sameOrigin, async (req, res) => {
   const back = ['/admin/saml', '/admin/oidc'].includes(req.body.back) ? req.body.back : '/admin';
   res.redirect(`${back}#settings`);
 });
+
+// ---------- registration assistant (see assistant.js) ----------
+
+// The CloakTail connection (reference URL, API credential, token) is shared by both pages and kept
+// only in this in-memory session; each protocol has its own conversation.
+const conversation = (req, protocol) => {
+  req.session.assistant ??= {};
+  return (req.session.assistant[protocol] ??= assistant.newConversation());
+};
+
+// What the agent registers: this app's own values for the protocol, and its current settings.
+function localValues(protocol) {
+  const s = getSettings();
+  const { sp, oidc: o } = active;
+  if (protocol === 'saml') {
+    return {
+      protocol: 'saml',
+      base_url: active.baseUrl,
+      sp_entity_id: sp.entityId,
+      sp_entity_id_is_default: !s.entityId,
+      acs_url: sp.acsUrl,
+      single_logout_url: sp.sloUrl,
+      home_url: sp.homeUrl,
+      sp_metadata_url: sp.metadataUrl,
+      name_id_format: sp.nameIdFormat ?? 'any',
+      expected_attributes: sp.expectedAttributes,
+      require_signed_response: sp.wantResponseSigned,
+      require_signed_assertions: sp.wantAssertionsSigned,
+      signs_requests: sp.signRequests,
+      expects_encrypted_assertions: sp.decryptAssertions,
+      signing_certificate_pem: sp.signRequests ? keys.signing?.cert ?? 'missing: save the SAML settings to generate one' : 'not in use',
+      encryption_certificate_pem: sp.decryptAssertions ? keys.encryption?.cert ?? 'missing: save the SAML settings to generate one' : 'not in use',
+      idp_configured: isConfigured('saml'),
+      current_idp_settings: { idpEntityId: s.idpEntityId, idpSsoUrl: s.idpSsoUrl, idpSloUrl: s.idpSloUrl, idpMetadataUrl: s.idpMetadataUrl, idpInitiatedUrl: s.idpInitiatedUrl, idpCert: s.idpCert ? 'pinned' : '' },
+    };
+  }
+  return {
+    protocol: 'oidc',
+    base_url: active.baseUrl,
+    redirect_uri: o.redirectUri,
+    post_logout_redirect_uri: o.postLogoutRedirectUri,
+    frontchannel_logout_uri: o.frontchannelLogoutUri,
+    web_origin: o.webOrigin,
+    home_url: o.homeUrl,
+    uses_pkce: o.usePkce,
+    scopes: o.scopes,
+    expected_claims: o.expectedClaims,
+    client_types_supported: 'confidential (client secret) or public (PKCE)',
+    configured: isConfigured('oidc'),
+    current_settings: { oidcIssuer: s.oidcIssuer, oidcClientId: s.oidcClientId, oidcClientSecret: s.oidcClientSecret ? 'set' : '' },
+  };
+}
+
+// What the page shows: never the credential, the token or the secrets.
+function assistantView(req, protocol) {
+  const conn = req.session.cloaktail;
+  return {
+    protocol,
+    enabled: assistant.isEnabled(),
+    model: config.gemini.model,
+    defaultReferenceUrl: config.cloaktail.referenceUrl,
+    connection: conn && {
+      referenceUrl: conn.referenceUrl,
+      clientId: conn.clientId,
+      token: conn.token && { scope: conn.token.scope, expiresAt: conn.token.expiresAt },
+    },
+    conversation: req.session.assistant?.[protocol] ?? assistant.newConversation(),
+  };
+}
+
+function assistantContext(req, protocol) {
+  return {
+    state: conversation(req, protocol),
+    protocol,
+    conn: req.session.cloaktail,
+    local: localValues,
+    save: async (section, values) => {
+      await applySettings(req, [section], () => saveSettings(section, { ...getSettings(), ...values }), 'Settings saved by the registration assistant.');
+      return { saved: Object.keys(values), configured: isConfigured(section), notes: req.session.flash?.notes ?? [] };
+    },
+  };
+}
+
+for (const protocol of ['saml', 'oidc']) {
+  const back = `/admin/${protocol}#assistant`;
+  const ready = (req, res) => {
+    if (!assistant.isEnabled() || !req.session.cloaktail) {
+      res.redirect(back);
+      return false;
+    }
+    return true;
+  };
+
+  app.post(`/assistant/${protocol}/connect`, sameOrigin, async (req, res, next) => {
+    try {
+      req.session.cloaktail = await assistant.connect(req.body);
+    } catch (err) {
+      if (!(err instanceof assistant.AssistantError)) return next(err);
+      const { clientSecret, ...values } = req.body; // never echo the secret back into the form
+      req.session.draft = { section: 'assistant', values, errors: err.fields };
+      setFlash(req, 'bad', 'Not connected to CloakTail. Check the highlighted fields.');
+    }
+    res.redirect(back);
+  });
+
+  app.post(`/assistant/${protocol}/message`, sameOrigin, async (req, res) => {
+    if (!ready(req, res)) return;
+    try {
+      await assistant.send(assistantContext(req, protocol), req.body.preset || req.body.message);
+    } catch (err) {
+      setFlash(req, 'bad', err.message);
+    }
+    res.redirect(back);
+  });
+
+  app.post(`/assistant/${protocol}/decide`, sameOrigin, async (req, res) => {
+    if (!ready(req, res)) return;
+    await assistant.decide(assistantContext(req, protocol), req.body.decision === 'approve');
+    res.redirect(back);
+  });
+
+  app.post(`/assistant/${protocol}/reset`, sameOrigin, (req, res) => {
+    if (req.session.assistant) delete req.session.assistant[protocol];
+    res.redirect(back);
+  });
+
+  app.post(`/assistant/${protocol}/disconnect`, sameOrigin, (req, res) => {
+    delete req.session.cloaktail;
+    delete req.session.assistant;
+    res.redirect(back);
+  });
+}
 
 // ---------- user migration through CloakTail ----------
 
@@ -887,7 +1021,7 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(config.port, () => {
-  console.log(`Test SP on ${config.baseUrl}`);
+  console.log(`Test SP on ${active.baseUrl}`);
   console.log(`  SAML  entity ID:    ${active.sp.entityId}${isConfigured('saml') ? '' : ' (IdP not configured)'}`);
   console.log(`        ACS URL:      ${active.sp.acsUrl}`);
   console.log(`  OIDC  client ID:    ${active.oidc.clientId || '(not configured)'}`);

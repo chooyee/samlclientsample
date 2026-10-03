@@ -2,6 +2,7 @@
 // Customers never see these; their pages are in customer.js.
 import { config } from '../config.js';
 import { NAME_ID_FORMATS, isCustomized } from '../settings.js';
+import { assistantCard } from './assistant.js';
 import { KEY_SIZES, VALIDITY_YEARS, certBase64 } from '../certs.js';
 import {
   esc, icon, layout, alert, pageHead, card, badge, statusBadge, none, code, copyable, kv, time,
@@ -22,6 +23,12 @@ const resetForm = (back) => (isCustomized()
   ? `<form class="inline" method="post" action="/settings/reset" data-confirm="Discard the saved settings for both protocols and use the .env values?">
       <input type="hidden" name="back" value="${back}"><button class="btn ghost sm">${icon('refresh')}Reset to .env values</button></form>`
   : '');
+
+// Shared by the SAML and OIDC settings: saving either changes it for both.
+const baseUrlField = (s, errors) => field({
+  name: 'baseUrl', label: 'Base URL', type: 'url', value: s.baseUrl, error: errors.baseUrl, required: true, mono: true,
+  hint: 'The address the browser uses for this app. Every URL to register in CloakTail is under it, for SAML, OpenID Connect and user migration alike.',
+});
 
 function importCard({ section, step, action, title, description, placeholder, draft }) {
   const { values, errors } = formState(draft, `${section}-import`, {});
@@ -181,8 +188,9 @@ export function samlPage(data) {
     <fieldset class="fieldset"><legend>Your app (SP)</legend>
       <p>From the application page, <em>Your app (SP) settings</em>.</p>
       <div class="fields">
+        ${baseUrlField(s, errors)}
         ${field({ name: 'entityId', label: 'Entity ID', value: s.entityId, error: errors.entityId, optional: true, mono: true,
-          placeholder: config.sp.defaultEntityId, hint: 'Becomes the Keycloak client ID. Empty uses the default shown.' })}
+          placeholder: sp.defaultEntityId, hint: 'Becomes the Keycloak client ID. Empty uses the default shown.' })}
         ${field({ name: 'nameIdFormat', label: 'Name ID format', value: s.nameIdFormat, error: errors.nameIdFormat, optional: true, mono: true,
           placeholder: 'Any', list: 'nameIdFormats', hint: 'The URN under <em>Name ID format</em>. Empty accepts whatever Keycloak sends.' })}
         <datalist id="nameIdFormats">${NAME_ID_FORMATS.map((f) => `<option value="${esc(f)}">`).join('')}</datalist>
@@ -210,6 +218,7 @@ export function samlPage(data) {
       ${pageHead(`SAML 2.0 ${statusBadge(ready.saml)}`, 'Test a SAML application registered in CloakTail. Every value here comes from, or goes to, the application page.',
         `${resetForm('/admin/saml')}${ready.saml ? `<a class="btn primary" href="/?via=saml">${icon('landmark')}Test on the bank sign-in</a>` : ''}`)}
       <div class="stack-lg">
+        ${assistantCard(data.assistant, draft)}
         ${register}
         ${importer}
         ${card({ id: 'settings', step: 3, title: 'Settings', description: `Defaults come from <code>.env</code>; saved changes are kept in <code>${esc(config.settingsFile)}</code>.`, body: form })}
@@ -274,6 +283,10 @@ export function oidcPage(data) {
   });
 
   const form = `<form method="post" action="/oidc/settings" novalidate>
+    <fieldset class="fieldset"><legend>Your app</legend>
+      <p>Where this app runs. The URLs in step 1 are under it.</p>
+      <div class="fields">${baseUrlField(s, errors)}</div>
+    </fieldset>
     <fieldset class="fieldset"><legend>Keycloak (OpenID provider)</legend>
       <p>From the application page, <em>Keycloak (OpenID provider) details</em>. Everything else is read from the discovery document.</p>
       <div class="fields">
@@ -311,6 +324,7 @@ export function oidcPage(data) {
       ${pageHead(`OpenID Connect ${statusBadge(ready.oidc)}`, 'Test an OpenID Connect application registered in CloakTail, as the portal\'s Node.js example does: issuer, client ID and secret are all the app is given.',
         `${resetForm('/admin/oidc')}${ready.oidc ? `<a class="btn primary" href="/?via=oidc">${icon('landmark')}Test on the bank sign-in</a>` : ''}`)}
       <div class="stack-lg">
+        ${assistantCard(data.assistant, draft)}
         ${register}
         ${importer}
         ${card({ id: 'settings', step: 3, title: 'Settings', description: `Defaults come from <code>.env</code>; saved changes are kept in <code>${esc(config.settingsFile)}</code>.`, body: form })}

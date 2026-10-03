@@ -8,43 +8,58 @@ function required(name) {
 
 const flag = (name, fallback) => (process.env[name] ?? String(fallback)).toLowerCase() === 'true';
 
-const baseUrl = (process.env.BASE_URL || 'http://localhost:4000').replace(/\/$/, '');
+const port = Number(process.env.PORT || 4000);
+const cloaktailUrl = (process.env.CLOAKTAIL_URL || 'http://localhost:3000').replace(/\/$/, '');
+
+// The URLs this app registers in CloakTail, all under the base URL: the address the browser uses.
+// The base URL is a setting (see settings.js); BASE_URL is only its default.
+export function appUrls(base) {
+  const baseUrl = base.replace(/\/+$/, '');
+  return {
+    baseUrl,
+    sp: {
+      defaultEntityId: `${baseUrl}/saml/metadata`,
+      acsUrl: `${baseUrl}/saml/acs`,
+      sloUrl: `${baseUrl}/saml/slo`,
+      metadataUrl: `${baseUrl}/saml/metadata`,
+      homeUrl: `${baseUrl}/`,
+    },
+    oidc: {
+      redirectUri: `${baseUrl}/oidc/callback`,
+      postLogoutRedirectUri: `${baseUrl}/oidc/logged-out`,
+      frontchannelLogoutUri: `${baseUrl}/oidc/frontchannel-logout`,
+      webOrigin: new URL(baseUrl).origin,
+      homeUrl: `${baseUrl}/`,
+    },
+    jwksUrl: `${baseUrl}/migrate/jwks.json`,
+    migrationReturnUrl: `${baseUrl}/migrate/return`,
+  };
+}
 
 // Fixed for the life of the process.
 export const config = {
-  port: Number(process.env.PORT || 4000),
-  baseUrl,
+  port,
   sessionSecret: required('SESSION_SECRET'),
-  secureCookies: baseUrl.startsWith('https://'),
   settingsFile: process.env.SETTINGS_FILE || 'data/settings.json',
   usersFile: process.env.USERS_FILE || 'data/users.json',
-
-  sp: {
-    defaultEntityId: `${baseUrl}/saml/metadata`,
-    acsUrl: `${baseUrl}/saml/acs`,
-    sloUrl: `${baseUrl}/saml/slo`,
-    metadataUrl: `${baseUrl}/saml/metadata`,
-    homeUrl: `${baseUrl}/`,
-  },
-
-  oidc: {
-    redirectUri: `${baseUrl}/oidc/callback`,
-    postLogoutRedirectUri: `${baseUrl}/oidc/logged-out`,
-    frontchannelLogoutUri: `${baseUrl}/oidc/frontchannel-logout`,
-    webOrigin: new URL(baseUrl).origin,
-    homeUrl: `${baseUrl}/`,
-  },
 
   legacyUsersFile: process.env.LEGACY_USERS_FILE || 'data/legacy-users.json',
 
   // User migration through CloakTail (see /migrate). The secret verifies results (always HS256)
   // and signs requests when the request signing method is "secret". Never shown, logged or saved.
   cloaktail: {
-    migrateUrl: `${(process.env.CLOAKTAIL_URL || 'http://localhost:3000').replace(/\/$/, '')}/migrate`,
+    migrateUrl: `${cloaktailUrl}/migrate`,
+    // Only pre-fills the registration assistant's form: the spec it works from is the URL entered there.
+    referenceUrl: process.env.CLOAKTAIL_REFERENCE_URL || '',
+  },
+
+  // The registration assistant on the SAML and OIDC pages. Off unless both are set.
+  gemini: {
+    apiKey: process.env.GEMINI_API_KEY || '',
+    model: process.env.GEMINI_MODEL || '',
   },
   migrationSecret: process.env.CLOAKTAIL_MIGRATION_SECRET || '',
   migrationKeyFile: process.env.MIGRATION_KEY_FILE || 'certs/migration-key.pem',
-  jwksUrl: `${baseUrl}/migrate/jwks.json`,
   // Results from POST /migrate/simulate carry simulated: true. Accepted only while testing.
   acceptSimulated: flag('MIGRATION_ACCEPT_SIMULATED', process.env.NODE_ENV !== 'production'),
 
@@ -62,6 +77,9 @@ export const config = {
 
 // Starting values for the settings editable on the home page (see settings.js).
 export const envDefaults = {
+  // The address the browser uses for this app.
+  baseUrl: process.env.BASE_URL || `http://localhost:${port}`,
+
   // As shown on the CloakTail application page, under "Keycloak (IdP) details".
   idpMetadataUrl: process.env.IDP_METADATA_URL || '',
   idpEntityId: process.env.IDP_ENTITY_ID || '',
@@ -89,5 +107,6 @@ export const envDefaults = {
   // Empty protocol: OpenID Connect when it is set up, else SAML.
   migrationProtocol: process.env.MIGRATION_PROTOCOL || '',
   migrationRequestSigning: process.env.MIGRATION_REQUEST_SIGNING || 'jwks',
-  migrationReturnUrl: process.env.MIGRATION_RETURN_URL || `${baseUrl}/migrate/return`,
+  // Empty: <base URL>/migrate/return.
+  migrationReturnUrl: process.env.MIGRATION_RETURN_URL || '',
 };

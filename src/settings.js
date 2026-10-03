@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { X509Certificate } from 'node:crypto';
-import { config, envDefaults } from './config.js';
+import { config, envDefaults, appUrls } from './config.js';
 
 export const NAME_ID_FORMATS = [
   'urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified',
@@ -60,16 +60,22 @@ function collector(raw) {
     if (value ? !isHttpUrl(value) : required) fail(name, `${label} must be an http(s) URL, as shown on the application page.`);
     return value;
   };
+  // The address the browser uses for this app; every URL registered in CloakTail is under it.
+  const baseUrl = () => {
+    const value = text(raw.baseUrl).replace(/\/+$/, '');
+    if (!isHttpUrl(value) || /[?#]/.test(value)) fail('baseUrl', 'Base URL must be an http(s) URL without a query or fragment: the address the browser uses for this app.');
+    return value;
+  };
   const done = (values) => {
     if (errors.length) throw new SettingsError(errors);
     return values;
   };
-  return { fail, url, done };
+  return { fail, url, baseUrl, done };
 }
 
 // Validates form input (checkboxes arrive as "on" or are absent) or saved JSON (booleans).
 export function normalizeSaml(raw) {
-  const { fail, url, done } = collector(raw);
+  const { fail, url, baseUrl, done } = collector(raw);
 
   const idpMetadataUrl = url('idpMetadataUrl', 'IdP metadata URL');
   const idpSsoUrl = url('idpSsoUrl', 'Single sign-on URL', { required: true });
@@ -96,6 +102,7 @@ export function normalizeSaml(raw) {
   if (/\s/.test(nameIdFormat)) fail('nameIdFormat', 'Name ID format must be a URN without spaces.');
 
   return done({
+    baseUrl: baseUrl(),
     idpMetadataUrl,
     idpEntityId,
     idpSsoUrl,
@@ -116,7 +123,7 @@ export function normalizeSaml(raw) {
 const issuerOf = (value) => text(value).replace(/\/\.well-known\/openid-configuration$/, '').replace(/\/+$/, '');
 
 export function normalizeOidc(raw) {
-  const { fail, done } = collector(raw);
+  const { fail, baseUrl, done } = collector(raw);
 
   const oidcIssuer = issuerOf(raw.oidcIssuer);
   if (!isHttpUrl(oidcIssuer)) fail('oidcIssuer', 'Issuer must be an http(s) URL, as shown on the application page.');
@@ -131,6 +138,7 @@ export function normalizeOidc(raw) {
   if (!scopes.includes('openid')) fail('oidcScopes', 'Scopes must include openid, or Keycloak returns no ID token.');
 
   return done({
+    baseUrl: baseUrl(),
     oidcIssuer,
     oidcClientId,
     oidcClientSecret,
@@ -147,15 +155,15 @@ export function normalizeMigration(raw) {
   if (!MIGRATION_PROTOCOLS.includes(migrationProtocol)) fail('migrationProtocol', 'Choose OpenID Connect, SAML or automatic.');
   const migrationRequestSigning = text(raw.migrationRequestSigning);
   if (!REQUEST_SIGNING.includes(migrationRequestSigning)) fail('migrationRequestSigning', 'Choose the JWKS URL or the migration secret.');
-  const migrationReturnUrl = url('migrationReturnUrl', 'Return URL', { required: true });
+  const migrationReturnUrl = url('migrationReturnUrl', 'Return URL');
   return done({ migrationProtocol, migrationRequestSigning, migrationReturnUrl });
 }
 
 const NORMALIZE = { saml: normalizeSaml, oidc: normalizeOidc, migration: normalizeMigration };
 const SECTION_KEYS = {
-  saml: ['idpMetadataUrl', 'idpEntityId', 'idpSsoUrl', 'idpSloUrl', 'idpInitiatedUrl', 'idpCert', 'entityId',
+  saml: ['baseUrl', 'idpMetadataUrl', 'idpEntityId', 'idpSsoUrl', 'idpSloUrl', 'idpInitiatedUrl', 'idpCert', 'entityId',
     'nameIdFormat', 'expectedAttributes', 'wantResponseSigned', 'wantAssertionsSigned', 'signRequests', 'decryptAssertions'],
-  oidc: ['oidcIssuer', 'oidcClientId', 'oidcClientSecret', 'oidcScopes', 'oidcUsePkce', 'oidcExpectedClaims'],
+  oidc: ['baseUrl', 'oidcIssuer', 'oidcClientId', 'oidcClientSecret', 'oidcScopes', 'oidcUsePkce', 'oidcExpectedClaims'],
   migration: ['migrationProtocol', 'migrationRequestSigning', 'migrationReturnUrl'],
 };
 
@@ -201,8 +209,9 @@ export function parsePortalOidcConfig(snippet) {
 
   const notes = [];
   const redirectUri = snippet.match(/\bredirect_uri\s*:\s*['"`]([^'"`]+)['"`]/)?.[1];
-  if (redirectUri && redirectUri !== config.oidc.redirectUri) {
-    notes.push(`The example's redirect URI is ${redirectUri}; add ${config.oidc.redirectUri} to the application's redirect URIs in the portal.`);
+  const ours = resolve().oidc.redirectUri;
+  if (redirectUri && redirectUri !== ours) {
+    notes.push(`The example's redirect URI is ${redirectUri}; add ${ours} to the application's redirect URIs in the portal.`);
   }
   if (!isPublic) notes.push('Copy the client secret from the application page; it is not in the example.');
   return { values, notes };
@@ -281,19 +290,24 @@ export function resetSettings() {
 
 // The SP, IdP and OIDC client values the app runs with, derived from the settings.
 export function resolve(s = current) {
-  const spEntityId = s.entityId || config.sp.defaultEntityId;
+  // A base URL saved by neither section (both incomplete) may be invalid; fall back to .env.
+  const urls = appUrls(isHttpUrl(s.baseUrl) ? s.baseUrl : envDefaults.baseUrl);
+  const spEntityId = s.entityId || urls.sp.defaultEntityId;
   const protocol = s.migrationProtocol || (isConfigured('oidc', s) ? 'oidc' : 'saml');
   return {
+    baseUrl: urls.baseUrl,
     migration: {
       protocol,
       protocolAuto: !s.migrationProtocol,
       // The request's iss: the client ID of the Keycloak sign-in that migrated users use.
       clientId: protocol === 'oidc' ? s.oidcClientId : spEntityId,
       requestSigning: s.migrationRequestSigning,
-      returnUrl: s.migrationReturnUrl,
+      returnUrl: s.migrationReturnUrl || urls.migrationReturnUrl,
+      defaultReturnUrl: urls.migrationReturnUrl,
+      jwksUrl: urls.jwksUrl,
     },
     sp: {
-      ...config.sp,
+      ...urls.sp,
       entityId: spEntityId,
       nameIdFormat: s.nameIdFormat || null,
       expectedAttributes: s.expectedAttributes ? s.expectedAttributes.split(', ') : [],
@@ -311,7 +325,7 @@ export function resolve(s = current) {
       cert: s.idpCert,
     },
     oidc: {
-      ...config.oidc,
+      ...urls.oidc,
       issuer: s.oidcIssuer,
       clientId: s.oidcClientId,
       clientSecret: s.oidcClientSecret,

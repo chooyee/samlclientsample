@@ -32,7 +32,7 @@ function registerCard({ m, keyStatus, hasSecret }) {
   const signing = m.requestSigning === 'jwks'
     ? [
       ['Request signing', `${badge('JWKS URL', 'ok')}<small>Choose <em>JWKS URL</em> on the migration page and paste the URL below.</small>`],
-      ['JWKS URL', `${copyable(config.jwksUrl, 'JWKS URL')}<small><a href="/migrate/jwks.json" target="_blank">Open the JWKS ${icon('external')}</a></small>`],
+      ['JWKS URL', `${copyable(m.jwksUrl, 'JWKS URL')}<small><a href="/migrate/jwks.json" target="_blank">Open the JWKS ${icon('external')}</a></small>`],
       ['Key ID (kid)', k ? copyable(k.kid, 'key ID') : none(keyStatus.error ? 'Key unreadable' : 'No key yet')],
       ['Algorithm', code('RS256')],
     ]
@@ -67,7 +67,7 @@ function keyCard({ keyStatus, m }) {
     id: 'key',
     iconHtml: `<span class="proto-icon oidc">${icon('key')}</span>`,
     title: `Request signing key ${m.requestSigning === 'jwks' ? badge('In use', 'ok') : badge('Not in use')}`,
-    description: `Published at <code>${esc(config.jwksUrl)}</code>. CloakTail fetches it again when a request names a new kid, so rotating needs no change in the portal.`,
+    description: `Published at <code>${esc(m.jwksUrl)}</code>. CloakTail fetches it again when a request names a new kid, so rotating needs no change in the portal.`,
     body,
     foot: `<form class="inline" method="post" action="/migrate/key"${k ? ' data-confirm="Replace the signing key? Requests signed with the old key stop verifying once CloakTail fetches the new JWKS."' : ''}>
       <button class="btn${k ? '' : ' primary'}">${icon('refresh')}${k ? 'Rotate key' : 'Generate key'}</button></form>`,
@@ -100,8 +100,8 @@ function settingsCard({ s, errors, m }) {
         </div>
       </fieldset>
       <fieldset class="fieldset"><legend>Return URL</legend>
-        <div class="fields">${field({ name: 'migrationReturnUrl', label: 'Return URL', type: 'url', value: s.migrationReturnUrl, error: errors.migrationReturnUrl, required: true, mono: true,
-          hint: 'Must be byte-for-byte one of the return URLs registered on the migration page. This app handles it at <code>/migrate/return</code>.' })}</div>
+        <div class="fields">${field({ name: 'migrationReturnUrl', label: 'Return URL', type: 'url', value: s.migrationReturnUrl, error: errors.migrationReturnUrl, optional: true, mono: true,
+          placeholder: m.defaultReturnUrl, hint: 'Must be byte-for-byte one of the return URLs registered on the migration page. This app handles it at <code>/migrate/return</code>. Empty uses the default shown, under the base URL.' })}</div>
       </fieldset>
       <hr class="divider">
       <div class="row"><button class="btn primary">Save settings</button></div>

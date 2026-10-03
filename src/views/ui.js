@@ -1,6 +1,5 @@
 // UI kit for the server-rendered pages: design tokens, layout and small components.
 // Plain template literals, no build step. Every value from outside goes through esc().
-import { config } from '../config.js';
 
 export const esc = (v) => String(v ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -40,6 +39,7 @@ const ICONS = {
   trend: '<path d="m22 7-8.5 8.5-5-5L2 17"/><path d="M16 7h6v6"/>',
   sliders: '<path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M2 14h4"/><path d="M10 8h4"/><path d="M18 16h4"/>',
   code: '<path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/>',
+  sparkle: '<path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"/><path d="M19 3v4"/><path d="M21 5h-4"/>',
   shieldCheck: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>',
 };
 
@@ -307,6 +307,18 @@ details.more[open] > summary { margin-bottom: 12px; }
 .setup-list strong { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .setup-list p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
 @media (max-width: 600px) { .setup-list li { grid-template-columns: 36px minmax(0, 1fr); } .setup-list li > .btn { grid-column: 2; justify-self: start; } }
+
+/* Registration assistant */
+.chat { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.msg { display: grid; gap: 2px; }
+.msg .who { font-size: 12px; font-weight: 600; color: var(--muted); }
+.msg .text { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); }
+.msg.user .text { background: var(--accent-soft); }
+.msg.note { display: flex; align-items: flex-start; gap: 6px; font-size: 12.5px; color: var(--muted); font-family: var(--mono); overflow-wrap: anywhere; }
+.msg.note .icon { width: 14px; height: 14px; margin-top: 2px; }
+.msg.note.bad { color: var(--bad); }
+.pending { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--warn); border-radius: 10px; }
+.pending-call { display: grid; gap: 8px; overflow-wrap: anywhere; }
 `;
 
 // ---------- client script: copy, tabs, confirm, relative times, show secret ----------
@@ -337,7 +349,17 @@ export const script = `
 
   document.addEventListener('submit', (e) => {
     const msg = e.target.dataset.confirm;
-    if (msg && !confirm(msg)) e.preventDefault();
+    if (msg && !confirm(msg)) return e.preventDefault();
+    // Slow posts (the assistant): show progress and stop double submits. Disabled after the
+    // submit, so the clicked button's value is still sent.
+    const busy = e.target.dataset.busy;
+    if (busy) {
+      const by = e.submitter;
+      setTimeout(() => {
+        for (const b of e.target.querySelectorAll('button')) b.disabled = true;
+        if (by) by.textContent = busy;
+      });
+    }
   });
 
   for (const tabs of document.querySelectorAll('[data-tabs]')) {
@@ -420,7 +442,7 @@ function sessionChip(user) {
     <span class="avatar">${esc(initials(name))}</span><span class="name">${esc(name)}</span>${protocolBadge(user.protocol)}</a>`;
 }
 
-export function layout({ title, path = '/', user, ready = {}, flash, body }) {
+export function layout({ title, path = '/', user, ready = {}, flash, active, body }) {
   const nav = NAV.map((item) => {
     if (item.group) return `<div class="nav-label">${item.group}</div>`;
     const current = item.href === path ? ' aria-current="page"' : '';
@@ -447,7 +469,7 @@ export function layout({ title, path = '/', user, ready = {}, flash, body }) {
   <aside class="sidebar">
     <a class="brand" href="/admin"><span class="logo">SP</span><span><strong>Admin console</strong><small>Test SP for CloakTail</small></span></a>
     <nav class="nav" aria-label="Admin">${nav}</nav>
-    <div class="sidebar-foot">Running at<code>${esc(config.baseUrl)}</code>
+    <div class="sidebar-foot">Running at<code>${esc(active?.baseUrl ?? '')}</code>
       <span class="warn-note">${icon('warn')}<span>No admin sign-in: run on localhost or a trusted network.</span></span></div>
   </aside>
   <div class="content">

@@ -47,7 +47,7 @@ docker run --rm -p 4000:4000 \
 
 Or pass your `.env` with `--env-file .env`. Settings, profiles, legacy users and key pairs live in the two volumes, so they survive restarts.
 
-- `BASE_URL` must be the address the **browser** uses; it sets the entity ID, ACS and redirect URIs.
+- The base URL must be the address the **browser** uses; it sets the entity ID, ACS and redirect URIs. `BASE_URL` is its default; change it under **Settings → Base URL** on the SAML or OpenID Connect page (switching between http and https needs a restart, for the session cookie).
 - From inside the container, `localhost` is the container itself. If Keycloak or CloakTail run on the host, use `http://host.docker.internal:<port>` for URLs the app fetches server-side (IdP metadata, OIDC issuer, `CLOAKTAIL_URL`); on Linux add `--add-host=host.docker.internal:host-gateway`. The OIDC issuer must still match what Keycloak puts in its tokens, so set Keycloak's hostname accordingly.
 - The image sets `NODE_ENV=production`, so simulated migration results are refused unless you set `MIGRATION_ACCEPT_SIMULATED=true`.
 
@@ -65,6 +65,7 @@ Settings and key pairs change without editing `.env` or restarting. Invalid inpu
 | → Single logout URL | Single logout URL (empty: local sign-out only) | `IDP_SLO_URL` |
 | → IdP-initiated login | IdP-initiated login (optional) | `IDP_INITIATED_URL` |
 | → Signing certificate | Signing certificate (optional; empty reads the metadata URL) | `IDP_CERT` |
+| (where this app runs; shared with OpenID Connect) | Base URL | `BASE_URL` |
 | Your app (SP) settings → Entity ID | Entity ID | `SP_ENTITY_ID` |
 | → Name ID format | Name ID format (the URN under it) | `NAME_ID_FORMAT` |
 | → Attributes | Expected attributes (missing ones are flagged after sign-in) | `EXPECTED_ATTRIBUTES` |
@@ -128,6 +129,22 @@ In CloakTail, **Applications → New application**, either:
 
 Then copy the application page's values into **SAML 2.0 → Settings** (above), create a test user under **Test users** in CloakTail, and sign in to this app as that user.
 
+### Or let the AI assistant do it
+
+The SAML 2.0 and OpenID Connect pages have a **Register with the AI assistant** card: a Google Gemini agent that registers this app through CloakTail's developer API and fills that page's settings from the result.
+
+1. Set `GEMINI_API_KEY` and `GEMINI_MODEL` (e.g. `gemini-flash-latest`) in `.env` and restart.
+2. On the card, enter the **CloakTail reference URL** (the API guide or OpenAPI spec the agent should work from) and an **API client ID and secret** from CloakTail's API credentials page.
+3. Click **Register this app**, or ask for something else (e.g. "check the existing registration").
+
+The agent has no CloakTail knowledge built in: it reads the reference and takes the token endpoint, paths and fields from it, so it follows whatever the reference documents. The code only fixes the guard rails:
+
+- It can call only the reference URL's server, so the credential can't be sent elsewhere.
+- The API credential stays in the server's in-memory session (never on disk, in logs or sent to Gemini). Secrets in API responses reach the model as `[secret:N]` handles; the server puts the real value back when the agent saves it here.
+- Requests that change something (POST, PUT, PATCH, DELETE) and changes to this app's settings wait for **Approve**.
+
+**Disconnect** forgets the credential and both conversations; restarting the app does too.
+
 ## Match the portal settings (SAML)
 
 The SP settings (home page, or `.env` defaults) must agree with the application's settings in CloakTail.
@@ -190,7 +207,7 @@ To test several applications at once, copy the folder or run with different sett
 PORT=4001 BASE_URL=http://localhost:4001 npm start
 ```
 
-Each instance has its own entity ID derived from `BASE_URL`, unless one is set. Give each its own `SETTINGS_FILE` and key files, or they share them.
+Each instance has its own entity ID derived from its base URL, unless one is set. Give each its own `SETTINGS_FILE` and key files, or they share them.
 
 ## Notes
 
