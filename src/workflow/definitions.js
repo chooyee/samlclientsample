@@ -23,6 +23,12 @@ export const CATALOG = {
     migration_configured: 'User migration settings are complete here (URL, secret, signing, protocol).',
     migration_check_passed: 'The last migration check was accepted by CloakTail.',
   },
+  // The same checks, as the pages name them.
+  checkLabels: {
+    signin_configured: 'Sign-in settings complete',
+    migration_configured: 'Migration settings complete',
+    migration_check_passed: 'CloakTail accepts a test request',
+  },
   approvals: {
     changes: 'The admin approves every change (API writes and settings saves).',
     none: 'Changes run without asking.',
@@ -37,6 +43,7 @@ export const REGISTRATION = {
   phases: [
     {
       id: 'discover',
+      summary: 'Reads the CloakTail guide and this app\'s values, and looks for an existing registration. Changes nothing.',
       title: 'Read the reference',
       goal: 'Read the CloakTail reference (fetch_reference) and this app\'s values (get_this_app). Get an access token. Find out whether an application with this app\'s entity ID or client ID already exists in CloakTail. Change nothing yet.',
       tools: ['fetch_reference', 'get_this_app', 'get_access_token', 'http_request'],
@@ -44,6 +51,7 @@ export const REGISTRATION = {
     },
     {
       id: 'register',
+      summary: 'Creates the application in CloakTail, or updates the existing one to match this app.',
       title: 'Register the app in CloakTail',
       goal: 'Create the application in CloakTail with exactly this app\'s values, or update the existing one so it matches. Ask the admin for anything the reference requires that get_this_app doesn\'t provide, such as an application name.',
       tools: ['http_request', 'fetch_reference', 'get_this_app', 'get_access_token'],
@@ -51,6 +59,7 @@ export const REGISTRATION = {
     },
     {
       id: 'configure',
+      summary: 'Copies what CloakTail returned (issuer, IDs, secret) into this app\'s sign-in settings.',
       title: 'Save the sign-in settings here',
       goal: 'Save the values CloakTail returned for this application into this app\'s sign-in settings with update_this_app_settings, so users can sign in.',
       tools: ['update_this_app_settings', 'get_this_app', 'http_request', 'fetch_reference', 'get_access_token'],
@@ -59,6 +68,7 @@ export const REGISTRATION = {
     },
     {
       id: 'migration_setup',
+      summary: 'Turns on user migration for the application in CloakTail.',
       title: 'Set up user migration in CloakTail',
       goal: 'Follow the reference\'s user migration instructions on the application you registered. Read the existing migration setup first and keep what matches. Register the return URL and request signing from get_this_app\'s user_migration (jwks unless this app already uses the secret method).',
       tools: ['http_request', 'fetch_reference', 'get_this_app', 'get_access_token'],
@@ -67,6 +77,7 @@ export const REGISTRATION = {
     },
     {
       id: 'migration_settings',
+      summary: 'Saves the migration URL and secret into this app.',
       title: 'Save the migration settings here',
       goal: 'Save into this app, in one update_this_app_settings call: migrationUrl (CloakTail\'s migration URL from the setup response), migrationSecret (the [secret:N] handle of the migration secret), migrationRequestSigning, migrationReturnUrl if it differs from the default, and migrationProtocol set to this protocol.',
       tools: ['update_this_app_settings', 'get_this_app', 'http_request', 'get_access_token'],
@@ -76,6 +87,7 @@ export const REGISTRATION = {
     },
     {
       id: 'migration_check',
+      summary: 'Sends a test migration request to CloakTail. Creates no users.',
       title: 'Check user migration',
       goal: 'Call check_user_migration and report the result. If CloakTail refuses the request, say why and what to fix.',
       tools: ['check_user_migration', 'get_this_app'],

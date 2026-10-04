@@ -206,6 +206,12 @@ function sameOrigin(req, res, next) {
   next();
 }
 
+// Admin pages show how many workflow runs wait for the admin, in the nav.
+app.use('/admin', async (req, res, next) => {
+  if (req.method === 'GET') res.locals.waiting = (await engine.waitingForAdmin()).length;
+  next();
+});
+
 // Renders a page with what every page needs, and consumes the one-time flash and form draft.
 function render(req, res, page, data = {}) {
   const { flash, draft } = req.session ?? {};
@@ -217,6 +223,7 @@ function render(req, res, page, data = {}) {
     flash,
     draft,
     ready: { saml: isConfigured('saml'), oidc: isConfigured('oidc'), migration: !migrationProblems().length },
+    waiting: res.locals.waiting ?? 0,
     active,
     ...data,
   }));
@@ -806,6 +813,7 @@ const RUN_ID = /^[a-z0-9-]{1,80}$/;
 app.get('/admin/workflows', async (req, res) => {
   render(req, res, workflowsPage, {
     engine: engine.engineStatus(),
+    attention: await engine.waitingForAdmin(),
     definitions: [REGISTRATION, USER_MIGRATION],
     runs: {
       [REGISTRATION.id]: await engine.listRuns(registration.WORKFLOW_NAME, { limit: 20 }),
@@ -1237,7 +1245,7 @@ app.use((err, req, res, next) => {
 });
 
 // DBOS resumes the runs a previous process left unfinished. The hosts above are set by now.
-await engine.launch();
+await engine.launch({ retry: true });
 
 app.listen(config.port, () => {
   console.log(`Test SP on ${active.baseUrl}`);

@@ -15,15 +15,21 @@ export const INPUT = 'input';
 
 let ready = false;
 let launchError = null;
+let retryTimer = null;
+const RETRY_MS = 15_000;
 
 export const isConfigured = () => Boolean(config.workflows.databaseUrl);
 export const isReady = () => ready;
 
-// What the pages say about the engine.
+// What the pages say about the engine. reason: for people; detail: the technical cause.
 export function engineStatus() {
-  if (!isConfigured()) return { ok: false, reason: 'Set DBOS_SYSTEM_DATABASE_URL to a Postgres database and restart.' };
-  if (launchError) return { ok: false, reason: `Could not start DBOS: ${launchError}` };
-  if (!ready) return { ok: false, reason: 'Starting…' };
+  if (!isConfigured()) {
+    return { ok: false, setup: true, reason: 'Workflows need a Postgres database. Set DBOS_SYSTEM_DATABASE_URL in .env and restart.' };
+  }
+  if (launchError) {
+    return { ok: false, retrying: Boolean(retryTimer), reason: 'The workflow database can\'t be reached. Retrying every 15 seconds; nothing is lost meanwhile.', detail: launchError };
+  }
+  if (!ready) return { ok: false, reason: 'Starting the workflow engine…' };
   return { ok: true, database: redactUrl(config.workflows.databaseUrl), version: config.workflows.version };
 }
 
@@ -38,22 +44,32 @@ function redactUrl(value) {
 }
 
 // Starts DBOS and resumes the runs a previous process left unfinished. Never throws: without a
-// database the app still works, minus the workflows.
-export async function launch({ databaseUrl = config.workflows.databaseUrl, name = APP_NAME } = {}) {
+// database the app still works, minus the workflows. retry: keep trying in the background if the
+// database can't be reached (it may still be starting).
+export async function launch({ databaseUrl = config.workflows.databaseUrl, name = APP_NAME, retry = false } = {}) {
   if (!databaseUrl) return false;
+  clearTimeout(retryTimer);
+  retryTimer = null;
   try {
     DBOS.setConfig({ name, systemDatabaseUrl: databaseUrl, applicationVersion: config.workflows.version, logLevel: process.env.DBOS_LOG_LEVEL || 'warn' });
     await DBOS.launch();
+    if (launchError) console.log('Workflows are on: connected to the database.');
     ready = true;
     launchError = null;
   } catch (err) {
+    if (launchError !== err.message) console.error(`Workflows are off: ${err.message}${retry ? ' (retrying every 15 s)' : ''}`);
     launchError = err.message;
-    console.error(`Workflows are off: ${err.message}`);
+    if (retry) {
+      retryTimer = setTimeout(() => launch({ databaseUrl, name, retry }), RETRY_MS);
+      retryTimer.unref();
+    }
   }
   return ready;
 }
 
 export async function shutdown() {
+  clearTimeout(retryTimer);
+  retryTimer = null;
   if (!ready) return;
   ready = false;
   await DBOS.shutdown();
@@ -152,6 +168,30 @@ export async function getRun(workflowId) {
   };
 }
 
-export const send = (workflowId, message) => DBOS.send(workflowId, message, INPUT);
-export const cancel = (workflowId) => DBOS.cancelWorkflow(workflowId);
+// Runs waiting for the admin (an approval or an answer), newest first. Cached briefly: every
+// admin page asks, for the nav.
+let attention = { at: 0, runs: [] };
+export async function waitingForAdmin() {
+  if (!ready) return [];
+  if (Date.now() - attention.at < 3000) return attention.runs;
+  try {
+    const pending = await DBOS.listWorkflows({ status: 'PENDING', limit: 50, sortDesc: true, loadInput: false, loadOutput: false });
+    const runs = (await Promise.all(pending.map(async (r) => ({ ...summary(r), state: await readState(r.workflowID) }))))
+      .filter((r) => ['waiting_approval', 'waiting_input'].includes(r.state?.status));
+    attention = { at: Date.now(), runs };
+  } catch {
+    attention = { at: Date.now(), runs: [] };
+  }
+  return attention.runs;
+}
+export const forgetWaiting = () => { attention.at = 0; };
+
+export const send = (workflowId, message) => {
+  forgetWaiting();
+  return DBOS.send(workflowId, message, INPUT);
+};
+export const cancel = (workflowId) => {
+  forgetWaiting();
+  return DBOS.cancelWorkflow(workflowId);
+};
 export const resume = (workflowId) => DBOS.resumeWorkflow(workflowId);

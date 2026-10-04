@@ -116,7 +116,7 @@ function composer(a) {
   return `<form method="post" action="/assistant/${protocol}/message" class="cc-composer" data-chat data-busy="Thinking…">
       ${textBox(working ? 'Working… you can type the next message' : 'e.g. Register this app as "Acme Bank (test)"')}
       <div class="cc-actions">
-        <span class="small muted">${working ? `${icon('refresh')} Working: this card refreshes by itself` : 'Enter to send · Shift+Enter for a new line'}</span>
+        <span class="small muted">Enter to send · Shift+Enter for a new line</span>
         <span class="row">
           ${run ? '' : `<button class="btn sm" name="preset" value="${esc(PRESET(protocol))}">${icon('play')}Register this app</button>`}
           <button class="btn primary sm" data-needs-text>${icon('arrow')}Send</button>
@@ -124,11 +124,16 @@ function composer(a) {
       </div></form>`;
 }
 
-// The phases of the run, as a compact strip.
-export function phaseStrip(st) {
+// The phases of the run, as a compact strip. live: the run is working and the card refreshes.
+export function phaseStrip(st, { live = false } = {}) {
   if (!st?.phases?.length) return '';
-  return `<ol class="wf-strip" aria-label="Workflow phases">${st.phases.map((p, i) => `<li class="${esc(p.status)}${i === st.phase && st.status !== 'done' ? ' current' : ''}" title="${esc(`${p.title}: ${p.status}${p.summary ? `. ${p.summary}` : ''}`)}">
-    <span class="wf-dot" aria-hidden="true">${p.status === 'done' ? icon('check') : p.status === 'skipped' ? '–' : i + 1}</span><span class="wf-name">${esc(p.title)}</span></li>`).join('')}</ol>`;
+  const n = st.phases.length;
+  const where = st.status === 'done' ? `All ${n} steps done` : `Step ${Math.min(st.phase + 1, n)} of ${n}`;
+  return `<div class="wf-strip" role="group" aria-label="${esc(where)}"><ol class="wf-strip-list" style="display:contents">${st.phases.map((p, i) => {
+    const current = i === st.phase && st.status !== 'done';
+    return `<li class="${esc(p.status)}${current ? ' current' : ''}"${current ? ' aria-current="step"' : ''} title="${esc(`${p.title}: ${p.status}${p.summary ? `. ${p.summary}` : ''}`)}">
+    <span class="wf-dot" aria-hidden="true">${p.status === 'done' ? icon('check') : p.status === 'skipped' ? '–' : i + 1}</span><span class="wf-name">${esc(p.title)}</span><span class="sr-only">(${esc(p.status)})</span></li>`;
+  }).join('')}</ol>${live ? '<span class="wf-live"><span class="dot" aria-hidden="true"></span>Working… updates live</span>' : ''}</div>`;
 }
 
 // One chat window: connection bar, phases, transcript (with any pending change last), composer.
@@ -147,24 +152,27 @@ function chatWindow(a) {
       <span class="cc-status-info"><span class="dot ok" aria-hidden="true"></span>Connected as ${code(conn.clientId)} to
         <a href="${esc(conn.referenceUrl)}" target="_blank" rel="noopener"><code>${esc(conn.referenceUrl)}</code>${icon('external')}</a> ${token}</span>
       <span class="row">
-        ${run ? `<a class="btn ghost sm" href="/admin/workflows/${esc(run.id)}">${icon('sliders')}Workflow run</a>` : ''}
+        ${run ? `<a class="btn ghost sm" href="/admin/workflows/${esc(run.id)}">${icon('sliders')}Run details</a>` : ''}
         ${run && !FINAL.includes(run.status) ? `<form class="inline" method="post" action="/assistant/${protocol}/reset" data-chat data-confirm="Stop this run and start over? Its saved steps stay on the Workflows page."><button class="btn ghost sm">${icon('refresh')}New conversation</button></form>` : ''}
         <form class="inline" method="post" action="/assistant/${protocol}/disconnect" data-chat data-confirm="Disconnect from CloakTail? A run already started keeps going; the saved API credential is kept."><button class="btn ghost sm">${icon('logout')}Disconnect</button></form>
       </span>
     </div>
-    ${phaseStrip(st)}
+    ${phaseStrip(st, { live: polling })}
     ${log}
     ${composer(a)}
   </div>`;
 }
 
 export function assistantCard(a, draft) {
-  const description = `Does steps 2 to 4 for you, then sets up <a href="/admin/migrate">user migration</a>: an AI agent (Google Gemini, <code>${esc(a.model)}</code>) registers this app in CloakTail as a ${LABEL[a.protocol]} application, using only the CloakTail API reference you give it, and fills this app's settings. It runs as a durable <a href="/admin/workflows">workflow</a>: every step is saved, so a restart doesn't lose it. You approve every change. Or skip it and follow the steps by hand.`;
+  const description = `Does steps 2 to 4 for you, and sets up <a href="/admin/migrate">user migration</a>. An AI agent (Google Gemini, <code>${esc(a.model)}</code>) registers this app in CloakTail as a ${LABEL[a.protocol]} application and fills the settings below. You approve every change, and progress is saved, so a restart doesn't lose it. Prefer to do it yourself? Skip this and follow the steps.`;
   let body;
   if (!a.enabled) {
     body = alert('info', 'The assistant is off', ['Set <code>GEMINI_API_KEY</code> and <code>GEMINI_MODEL</code> in <code>.env</code> and restart to turn it on.']);
   } else if (!a.engine.ok) {
-    body = alert('info', 'Workflows are off', [esc(a.engine.reason), 'The assistant runs as a durable workflow, saved in Postgres. See "Workflows" in the README.']);
+    body = alert(a.engine.setup ? 'info' : 'warn', a.engine.setup ? 'The assistant needs workflows set up' : 'The assistant is paused', [
+      esc(a.engine.reason),
+      a.engine.setup ? 'The assistant saves every step in Postgres; see "Workflows" in the README.' : 'You can still follow steps 2 to 4 by hand.',
+    ]);
   } else if (!a.connection) {
     body = connectForm(a, draft);
   } else {

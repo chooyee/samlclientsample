@@ -212,7 +212,7 @@ The registration assistant and user migration run as durable workflows on [DBOS]
 DBOS_SYSTEM_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/testsp_dbos
 ```
 
-DBOS creates that database and its tables on first start (the user needs permission to create a database, or create it beforehand and make the user its owner). `docker compose up -d postgres` starts a local Postgres with these credentials. Without the URL the app works as before, except that the assistant is off and user migrations aren't tracked.
+DBOS creates that database and its tables on first start (the user needs permission to create a database, or create it beforehand and make the user its owner). `docker compose up -d postgres` starts a local Postgres with these credentials. Without the URL the app works as before, except that the assistant is off and user migrations aren't tracked. If the database can't be reached (say, Postgres is still starting), the app starts anyway and keeps retrying every 15 seconds; the pages say workflows are paused until it connects.
 
 What being durable changes:
 
@@ -221,7 +221,7 @@ What being durable changes:
 - **No duplicates.** A change CloakTail already received is never sent again on replay. Write requests also carry an `Idempotency-Key` header (`<run id>:<call number>`) for servers that honour it.
 - **Secrets.** Step results are stored in Postgres. The values behind `[secret:N]` handles are stored encrypted (AES-256-GCM, key derived from `SESSION_SECRET`); the model's view, the transcript and the run's published state only ever hold the handles. Changing `SESSION_SECRET` leaves old runs' handles unresolved.
 
-**Workflows** (`/admin/workflows`) shows each workflow's definition as its phases (tools, what needs your approval, the check that ends the phase) and its recent runs. A run's page shows its phases, transcript, cost (model calls and tokens), and the steps DBOS saved; **Stop** cancels a run and **Resume** carries a stopped or failed run on from its last saved step.
+**Workflows** (`/admin/workflows`) starts with the runs **waiting for you** (an approval or an answer), also counted on the sidebar on every admin page. Then each workflow's recent runs, and how it works: its steps in plain words, what you approve, and the check that ends each step (the agent's own instructions fold away under each step). A run's page shows its phases, transcript, cost (model calls and tokens), and the steps DBOS saved; **Stop** cancels a run and **Resume** carries a stopped or failed run on from its last saved step.
 
 ### The registration workflow is data
 
