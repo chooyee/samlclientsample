@@ -8,17 +8,18 @@ function connectForm(a, draft) {
   const fromDraft = draft?.section === 'assistant';
   const values = fromDraft ? draft.values : {};
   const errors = (fromDraft && draft.errors) || {};
+  if (!a.credentials.saved) {
+    return alert('info', 'Save the CloakTail API credential first', [
+      `The assistant registers this app with it. Enter it on the <a href="/admin/api">API credentials</a> page; it is never shown to the AI model.`,
+    ]);
+  }
   return `<form method="post" action="/assistant/${a.protocol}/connect" novalidate data-chat data-busy="Connecting…">
     ${Object.keys(errors).length ? alert('bad', 'Not connected to CloakTail', ['Check the highlighted fields.'], { cls: 'flash' }) : ''}
     <div class="fields">
       ${field({ name: 'referenceUrl', label: 'CloakTail reference URL', type: 'url', value: values.referenceUrl ?? a.defaultReferenceUrl, error: errors.referenceUrl, required: true, mono: true,
-        hint: 'The CloakTail API guide or spec the agent works from, e.g. its agent guide or OpenAPI document. The agent learns the token endpoint, paths and fields from it, and can only call that server.' })}
-      ${field({ name: 'clientId', label: 'API client ID', value: values.clientId, error: errors.clientId, required: true, mono: true,
-        hint: 'From CloakTail\'s API credentials page.' })}
-      ${field({ name: 'clientSecret', label: 'API client secret', type: 'password', value: '', error: errors.clientSecret, required: true, mono: true,
-        hint: 'Kept in this browser session\'s server memory only: never saved, logged or shown to the AI model.',
-        after: `<button type="button" class="btn" data-reveal="f-clientSecret" aria-pressed="false" aria-label="Show secret">${icon('eye')}</button>` })}
+        hint: `The CloakTail API guide or spec the agent works from, e.g. its agent guide or OpenAPI document, on ${code(a.credentials.cloaktailUrl)}. The agent learns the paths and fields from it, and can only call that server.` })}
     </div>
+    <p class="hint">API credential ${code(a.credentials.clientId)}, from <a href="/admin/api">API credentials</a>. The agent asks this app for a token; it never sees the credential or the token.</p>
     <div class="row" style="margin-top:16px"><button class="btn primary">${icon('login')}Connect</button></div>
   </form>`;
 }
@@ -120,7 +121,7 @@ function chatWindow(a) {
   const { connection: conn, conversation: c, protocol } = a;
   const token = conn.token
     ? `<span${conn.token.scope ? ` title="Scopes: ${esc(conn.token.scope)}"` : ''}>${badge('Token obtained', 'ok')}</span>${conn.token.expiresAt ? ` <span class="small">expires ${time(new Date(conn.token.expiresAt).toISOString())}</span>` : ''}`
-    : `<span title="The agent gets one as the reference describes.">${badge('No token yet')}</span>`;
+    : `<span title="The agent asks this app for one.">${badge('No token yet')}</span>`;
   const log = c.log.length || c.pending
     ? `<ol class="cc-log" aria-live="polite">${c.log.map(entry).join('')}${pendingEntry(a)}</ol>`
     : `<div class="cc-log cc-empty"><p>Ask it to register this app, or to check an existing registration. It reads the reference first, asks you before each change, then fills the settings below.</p></div>`;
@@ -130,7 +131,7 @@ function chatWindow(a) {
         <a href="${esc(conn.referenceUrl)}" target="_blank" rel="noopener"><code>${esc(conn.referenceUrl)}</code>${icon('external')}</a> ${token}</span>
       <span class="row">
         ${c.log.length ? `<form class="inline" method="post" action="/assistant/${protocol}/reset" data-chat><button class="btn ghost sm">${icon('refresh')}New conversation</button></form>` : ''}
-        <form class="inline" method="post" action="/assistant/${protocol}/disconnect" data-chat data-confirm="Disconnect from CloakTail? The credential and both conversations are forgotten."><button class="btn ghost sm">${icon('logout')}Disconnect</button></form>
+        <form class="inline" method="post" action="/assistant/${protocol}/disconnect" data-chat data-confirm="Disconnect from CloakTail? Both conversations are forgotten; the saved API credential is kept."><button class="btn ghost sm">${icon('logout')}Disconnect</button></form>
       </span>
     </div>
     ${log}

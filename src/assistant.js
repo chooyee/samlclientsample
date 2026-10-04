@@ -1,15 +1,18 @@
 // Registration assistant on the SAML and OIDC pages: a Gemini agent that registers this app in
 // CloakTail and copies the values CloakTail returns into this app's settings.
 //
-// It knows nothing about CloakTail's API in advance. The admin gives it a reference URL (an API
-// guide or spec) and an API credential; the agent reads the reference and works out the token
-// endpoint, the paths and the fields from it. What the code does fix is the safety around it:
-// - Requests go only to the reference URL's origin, so the credential can't be sent elsewhere.
-// - The credential and any secret in a response stay on this server. The model sees secrets as
-//   [secret:N] handles, which the server substitutes when the agent saves or sends them.
+// It knows nothing about CloakTail's API paths and fields in advance. The admin gives it a reference
+// URL (an API guide or spec) and the agent works them out from it. The API credential is saved on
+// the API credentials page and getting a token is built into this app (see apiCredentials.js): the
+// agent only asks for one. What the code fixes is the safety around it:
+// - The reference must be on the saved CloakTail server, and requests go only to its origin, so the
+//   token can't be sent elsewhere.
+// - The credential, the token and any secret in a response stay on this server. The model sees
+//   secrets as [secret:N] handles, which the server substitutes when the agent saves or sends them.
 // - Requests that change something, and changes to this app's settings, wait for the admin.
 import { GoogleGenAI } from '@google/genai';
 import { config } from './config.js';
+import * as credentials from './apiCredentials.js';
 
 const MAX_STEPS = 12; // model calls per message or approval
 const MAX_TEXT = 200_000; // characters of a fetched document passed to the model
@@ -39,17 +42,17 @@ async function request(url, init = {}) {
 
 // ---------- connection (held in the admin's session, in memory only) ----------
 
-// Checks the reference is reachable. The credential is only checked when the agent first uses it,
-// since where and how to use it is in the reference.
-export async function connect({ referenceUrl, clientId, clientSecret }) {
+// Checks the reference is reachable and on the CloakTail server the saved credential is for.
+export async function connect({ referenceUrl }) {
   const url = String(referenceUrl ?? '').trim();
-  const id = String(clientId ?? '').trim();
-  const secret = String(clientSecret ?? '').trim();
   const errors = {};
-  if (!isHttpUrl(url)) errors.referenceUrl = 'Reference URL must be an http(s) URL.';
-  if (!id) errors.clientId = 'Client ID is required.';
-  if (!secret) errors.clientSecret = 'Client secret is required.';
-  if (!errors.referenceUrl) {
+  if (!credentials.hasCredentials()) {
+    errors.referenceUrl = 'Save the CloakTail API credential on the API credentials page first.';
+  } else if (!isHttpUrl(url)) {
+    errors.referenceUrl = 'Reference URL must be an http(s) URL.';
+  } else if (new URL(url).origin !== new URL(credentials.cloaktailUrl()).origin) {
+    errors.referenceUrl = `The reference must be on ${new URL(credentials.cloaktailUrl()).origin}, the CloakTail server the saved API credential is for.`;
+  } else {
     try {
       const res = await request(url);
       if (res.status !== 200) errors.referenceUrl = `The reference URL answered ${res.status}.`;
@@ -58,7 +61,7 @@ export async function connect({ referenceUrl, clientId, clientSecret }) {
     }
   }
   if (Object.keys(errors).length) throw Object.assign(new AssistantError('Not connected.'), { fields: errors });
-  return { referenceUrl: url, origin: new URL(url).origin, clientId: id, clientSecret: secret, token: null, secrets: {} };
+  return { referenceUrl: url, origin: new URL(url).origin, secrets: {} };
 }
 
 // Resolves a URL the model gave against the reference, and keeps it on the reference's origin.
@@ -170,16 +173,8 @@ function declarations(protocol) {
     },
     {
       name: 'get_access_token',
-      description: 'Get an access token with the OAuth 2.0 client credentials grant, using the API credential the admin entered (you never see it). Use the token endpoint and client authentication the reference documents. The token is kept on the server and sent as a Bearer token on every later http_request.',
-      parametersJsonSchema: {
-        type: 'object',
-        properties: {
-          token_url: { type: 'string', description: 'Token endpoint, from the reference.' },
-          client_auth: { type: 'string', enum: ['client_secret_basic', 'client_secret_post'], description: 'How to send the credential, as the reference says. Default client_secret_basic.' },
-          scope: { type: 'string', description: 'Space-separated scopes, if the reference says to request specific ones.' },
-        },
-        required: ['token_url'],
-      },
+      description: 'Get a CloakTail API access token with the API credential the admin saved. This app knows how; you give nothing and never see the credential or the token. The token is kept on the server, attached as a Bearer token to every later http_request, and renewed when it expires.',
+      parametersJsonSchema: { type: 'object', properties: {} },
     },
     {
       name: 'http_request',
@@ -237,35 +232,28 @@ const tools = {
     return { log: `HTTP ${res.status}, ${res.text.length.toLocaleString('en')} characters`, response: { url, ...responseForModel(conn, res) } };
   },
 
-  async get_access_token({ token_url: tokenUrl, client_auth: auth = 'client_secret_basic', scope }, { conn }) {
-    const url = onReferenceOrigin(conn, tokenUrl);
-    const form = new URLSearchParams({ grant_type: 'client_credentials' });
-    if (scope) form.set('scope', scope);
-    const headers = { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' };
-    if (auth === 'client_secret_post') {
-      form.set('client_id', conn.clientId);
-      form.set('client_secret', conn.clientSecret);
-    } else {
-      headers.authorization = `Basic ${Buffer.from(`${encodeURIComponent(conn.clientId)}:${encodeURIComponent(conn.clientSecret)}`).toString('base64')}`;
-    }
-    const res = await request(url, { method: 'POST', headers, body: form });
-    let json = null;
+  async get_access_token() {
     try {
-      json = JSON.parse(res.text);
-    } catch { /* reported below */ }
-    if (res.status === 200 && json?.access_token) {
-      conn.token = { value: json.access_token, expiresAt: json.expires_in ? Date.now() + json.expires_in * 1000 : null, scope: json.scope ?? null };
-      const { access_token: _, ...rest } = json;
-      return { log: `Access token obtained${json.expires_in ? `, expires in ${json.expires_in} s` : ''}`, response: { status: 200, ok: true, ...redact(conn, rest), note: 'Token stored; it is attached to http_request from now on.' } };
+      const t = await credentials.getAccessToken({ force: true });
+      const expiresIn = t.expiresAt ? Math.round((t.expiresAt - Date.now()) / 1000) : null;
+      return {
+        log: `Access token obtained${expiresIn ? `, expires in ${expiresIn} s` : ''}`,
+        response: { ok: true, expires_in: expiresIn, scope: t.scope, note: 'Token stored; it is attached to http_request from now on.' },
+      };
+    } catch (err) {
+      if (err instanceof credentials.CredentialsError) throw new AssistantError(err.message);
+      throw err;
     }
-    return { log: `HTTP ${res.status}: no access token`, response: responseForModel(conn, res) };
   },
 
   async http_request({ method, url, json_body: jsonBody }, { conn }) {
     const verb = String(method).toUpperCase();
     const target = onReferenceOrigin(conn, url);
     const headers = { accept: 'application/json, text/plain;q=0.9, */*;q=0.5' };
-    if (conn.token) headers.authorization = `Bearer ${conn.token.value}`;
+    const token = await credentials.currentToken().catch((err) => {
+      throw new AssistantError(err.message);
+    });
+    if (token) headers.authorization = `Bearer ${token.value}`;
     let body;
     if (jsonBody && verb !== 'GET') {
       try {
@@ -276,9 +264,8 @@ const tools = {
       headers['content-type'] = 'application/json';
     }
     const res = await request(target, { method: verb, headers, body });
-    const expired = conn.token?.expiresAt && conn.token.expiresAt < Date.now();
     const response = responseForModel(conn, res);
-    if (res.status === 401 && expired) response.note = 'The access token has expired: call get_access_token again.';
+    if (res.status === 401) response.note = token ? 'The access token was refused: call get_access_token again.' : 'No access token yet: call get_access_token first.';
     return { log: `HTTP ${res.status}`, response };
   },
 
@@ -314,7 +301,6 @@ const tools = {
 // What a call acts on, shown next to its name in the transcript.
 function callTarget({ name, args = {} }) {
   if (name === 'fetch_reference') return String(args.url ?? '');
-  if (name === 'get_access_token') return String(args.token_url ?? '');
   if (name === 'http_request') return `${String(args.method).toUpperCase()} ${args.url}`;
   if (name === 'update_this_app_settings') return Object.keys(args).join(', ');
   return '';
@@ -349,7 +335,7 @@ Your job: register this app in CloakTail as a ${label} application, or bring an 
 What you know about CloakTail comes only from the reference the admin gave: ${conn.referenceUrl}
 Read it first with fetch_reference, and follow the documents it points to (for example an OpenAPI description) when you need details. Use only endpoints, fields and values the reference documents; never guess them. If the reference doesn't say how to do something, tell the admin.
 
-The admin's API credential is held by the server. Find the token endpoint and client authentication in the reference and call get_access_token; the token is then attached to http_request. You never see secrets: they appear as [secret:N] handles, which you can pass to update_this_app_settings or put in a request body.
+The admin's API credential is saved on the server, and the server knows how to get a token with it: call get_access_token (no arguments) before your first API call, and again if a call answers 401. The token is then attached to http_request. Ignore the reference's instructions for getting a token or handling the credential: get_access_token does that. You never see secrets: they appear as [secret:N] handles, which you can pass to update_this_app_settings or put in a request body.
 
 Call get_this_app for this app's values. Register exactly those (URLs, entity or client ID, switches, certificates); don't invent values. Before creating anything, check whether an application with this app's entity ID or client ID already exists, and update it instead of creating a duplicate. Ask the admin for anything the reference requires that get_this_app doesn't provide (for example an application name), unless they already said.
 

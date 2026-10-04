@@ -134,16 +134,17 @@ Then copy the application page's values into **SAML 2.0 → Settings** (above), 
 The SAML 2.0 and OpenID Connect pages have a **Register with the AI assistant** card: a Google Gemini agent that registers this app through CloakTail's developer API and fills that page's settings from the result.
 
 1. Set `GEMINI_API_KEY` and `GEMINI_MODEL` (e.g. `gemini-flash-latest`) in `.env` and restart.
-2. On the card, enter the **CloakTail reference URL** (the API guide or OpenAPI spec the agent should work from) and an **API client ID and secret** from CloakTail's API credentials page.
-3. Click **Register this app**, or ask for something else (e.g. "check the existing registration").
+2. On **API credentials** (`/admin/api`), enter the **CloakTail URL** and an **API client ID and secret** from CloakTail's API credentials page, then **Save and get access token** to check them. This app gets tokens itself (`POST <CloakTail URL>/api/v1/oauth/token`, client credentials, HTTP Basic).
+3. On the card, enter the **CloakTail reference URL** (the API guide or OpenAPI spec the agent should work from; it defaults to `<CloakTail URL>/api/v1/agent.md`).
+4. Click **Register this app**, or ask for something else (e.g. "check the existing registration").
 
-The agent has no CloakTail knowledge built in: it reads the reference and takes the token endpoint, paths and fields from it, so it follows whatever the reference documents. The code only fixes the guard rails:
+The agent has no CloakTail knowledge built in: it reads the reference and takes the paths and fields from it, so it follows whatever the reference documents. The code only fixes the guard rails:
 
-- It can call only the reference URL's server, so the credential can't be sent elsewhere.
-- The API credential stays in the server's in-memory session (never on disk, in logs or sent to Gemini). Secrets in API responses reach the model as `[secret:N]` handles; the server puts the real value back when the agent saves it here.
+- The reference must be on the saved CloakTail server, and the agent can call only that server, so the token can't be sent elsewhere.
+- The agent gets a token by calling `get_access_token`, which takes no arguments: the API credential and the token never reach Gemini. The credential is saved in `data/api-credentials.json` (git-ignored); the token is kept in memory and renewed when it expires. Secrets in API responses reach the model as `[secret:N]` handles; the server puts the real value back when the agent saves it here.
 - Requests that change something (POST, PUT, PATCH, DELETE) and changes to this app's settings wait for **Approve**.
 
-**Disconnect** forgets the credential and both conversations; restarting the app does too.
+**Disconnect** forgets both conversations; the saved credential is kept until you delete it on the API credentials page.
 
 ## Match the portal settings (SAML)
 

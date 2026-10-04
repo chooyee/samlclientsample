@@ -611,6 +611,7 @@ const NAV = [
   { group: 'User migration' },
   { href: '/admin/migrate', label: 'Migration setup', icon: 'migrate', section: 'migration' },
   { group: 'App' },
+  { href: '/admin/api', label: 'API credentials', icon: 'code' },
   { href: '/admin/certs', label: 'Certificates', icon: 'key' },
   { href: '/admin/users', label: 'Local profiles', icon: 'users' },
   { group: 'Customer site' },

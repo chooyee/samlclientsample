@@ -13,8 +13,10 @@ import * as oidc from './oidc.js';
 import * as migration from './migration.js';
 import * as legacy from './legacyUsers.js';
 import * as assistant from './assistant.js';
+import * as credentials from './apiCredentials.js';
 import { adminHomePage, samlPage, oidcPage, certsPage, usersPage } from './views/pages.js';
 import { migrationPage } from './views/migration.js';
+import { apiCredentialsPage } from './views/apiCredentials.js';
 import { homePage, legacyPage, redirectToCloakTail, errorPage } from './views/customer.js';
 
 // ---------- key pairs ----------
@@ -232,6 +234,8 @@ app.get('/admin/oidc', async (req, res) => {
 app.get('/admin/certs', (req, res) => render(req, res, certsPage, { keys, keyErrors }));
 
 app.get('/admin/users', (req, res) => render(req, res, usersPage, { profiles: listProfiles() }));
+
+app.get('/admin/api', (req, res) => render(req, res, apiCredentialsPage, { credentials: credentials.credentialsView() }));
 
 // The admin pages used to live at the top level.
 for (const page of ['saml', 'oidc', 'certs', 'users', 'migrate']) {
@@ -542,10 +546,55 @@ app.post('/settings/reset', sameOrigin, async (req, res) => {
   res.redirect(`${back}#settings`);
 });
 
+// ---------- CloakTail API credential (see apiCredentials.js) ----------
+
+function credentialsFailed(req, body, err) {
+  if (!(err instanceof credentials.CredentialsError)) throw err;
+  const { clientSecret, ...values } = body; // never echo the secret back into the form
+  req.session.draft = { section: 'api', values, errors: err.fields };
+  setFlash(req, 'bad', err.message, Object.keys(err.fields).length ? ['Check the highlighted fields.'] : []);
+}
+
+// "Save" stores the credential; "Save and get access token" also checks it against CloakTail.
+app.post('/api-credentials', sameOrigin, async (req, res) => {
+  try {
+    credentials.saveCredentials(req.body);
+    if (req.body.action === 'token') {
+      const t = await credentials.getAccessToken({ force: true }).catch((err) => {
+        throw new credentials.CredentialsError(`API credential saved, but no access token: ${err.message}`);
+      });
+      setFlash(req, 'ok', 'API credential saved and an access token obtained.', [t.scope ? `Scopes: ${t.scope}` : 'The token has no scopes.']);
+    } else {
+      setFlash(req, 'ok', 'API credential saved.');
+    }
+  } catch (err) {
+    credentialsFailed(req, req.body, err);
+  }
+  res.redirect('/admin/api');
+});
+
+app.post('/api-credentials/token', sameOrigin, async (req, res) => {
+  try {
+    const t = await credentials.getAccessToken({ force: true });
+    setFlash(req, 'ok', 'Access token obtained.', [t.scope ? `Scopes: ${t.scope}` : 'The token has no scopes.']);
+  } catch (err) {
+    credentialsFailed(req, {}, err);
+  }
+  res.redirect('/admin/api');
+});
+
+app.post('/api-credentials/delete', sameOrigin, (req, res) => {
+  credentials.deleteCredentials();
+  delete req.session.cloaktail; // the assistant can't call CloakTail without it
+  setFlash(req, 'ok', 'API credential deleted.');
+  res.redirect('/admin/api');
+});
+
 // ---------- registration assistant (see assistant.js) ----------
 
-// The CloakTail connection (reference URL, API credential, token) is shared by both pages and kept
-// only in this in-memory session; each protocol has its own conversation.
+// The CloakTail connection (reference URL, secret handles) is shared by both pages and kept only in
+// this in-memory session; each protocol has its own conversation. The API credential and token are
+// in apiCredentials.js.
 const conversation = (req, protocol) => {
   req.session.assistant ??= {};
   return (req.session.assistant[protocol] ??= assistant.newConversation());
@@ -620,16 +669,14 @@ function localValues(protocol) {
 // What the page shows: never the credential, the token or the secrets.
 function assistantView(req, protocol) {
   const conn = req.session.cloaktail;
+  const cred = credentials.credentialsView();
   return {
     protocol,
     enabled: assistant.isEnabled(),
     model: config.gemini.model,
-    defaultReferenceUrl: config.cloaktail.referenceUrl,
-    connection: conn && {
-      referenceUrl: conn.referenceUrl,
-      clientId: conn.clientId,
-      token: conn.token && { scope: conn.token.scope, expiresAt: conn.token.expiresAt },
-    },
+    credentials: cred,
+    defaultReferenceUrl: config.cloaktail.referenceUrl || (cred.saved ? `${cred.cloaktailUrl}${credentials.AGENT_GUIDE_PATH}` : ''),
+    connection: conn && { referenceUrl: conn.referenceUrl, clientId: cred.clientId, token: cred.token },
     conversation: req.session.assistant?.[protocol] ?? assistant.newConversation(),
   };
 }
@@ -664,7 +711,7 @@ function assistantContext(req, protocol) {
 for (const protocol of ['saml', 'oidc']) {
   const back = `/admin/${protocol}#assistant`;
   const ready = (req, res) => {
-    if (!assistant.isEnabled() || !req.session.cloaktail) {
+    if (!assistant.isEnabled() || !req.session.cloaktail || !credentials.hasCredentials()) {
       res.redirect(back);
       return false;
     }
@@ -676,8 +723,7 @@ for (const protocol of ['saml', 'oidc']) {
       req.session.cloaktail = await assistant.connect(req.body);
     } catch (err) {
       if (!(err instanceof assistant.AssistantError)) return next(err);
-      const { clientSecret, ...values } = req.body; // never echo the secret back into the form
-      req.session.draft = { section: 'assistant', values, errors: err.fields }; // shown in the card
+      req.session.draft = { section: 'assistant', values: { referenceUrl: req.body.referenceUrl }, errors: err.fields }; // shown in the card
     }
     res.redirect(back);
   });

@@ -43,10 +43,14 @@ export const config = {
   usersFile: process.env.USERS_FILE || 'data/users.json',
 
   legacyUsersFile: process.env.LEGACY_USERS_FILE || 'data/legacy-users.json',
+  // The CloakTail API credential, saved on the API credentials page (see apiCredentials.js).
+  apiCredentialsFile: process.env.API_CREDENTIALS_FILE || 'data/api-credentials.json',
 
   // User migration's URL and secret are settings (see settings.js): they come with the
   // registration, from CloakTail's migration page or API.
   cloaktail: {
+    // Only pre-fills the API credentials page: the URL saved there is the one used.
+    url: (process.env.CLOAKTAIL_URL || '').replace(/\/+$/, ''),
     // Only pre-fills the registration assistant's form: the spec it works from is the URL entered there.
     referenceUrl: process.env.CLOAKTAIL_REFERENCE_URL || '',
   },
