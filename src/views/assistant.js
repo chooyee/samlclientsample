@@ -1,6 +1,8 @@
-// The registration assistant card on the SAML and OIDC pages (see assistant.js).
+// The registration assistant card on the SAML and OIDC pages (see assistant.js). It shows the
+// current workflow run (workflow/registration.js): its phases, transcript and pending approval.
 import { esc, icon, alert, card, code, badge, field, time, codeBlock } from './ui.js';
 import { markdown } from './markdown.js';
+import { CATALOG } from '../workflow/definitions.js';
 
 const LABEL = { saml: 'SAML 2.0', oidc: 'OpenID Connect' };
 
@@ -25,14 +27,7 @@ function connectForm(a, draft) {
 }
 
 // Tool names as the transcript shows them, Claude Code style.
-const TOOL_LABEL = {
-  fetch_reference: 'Fetch',
-  get_access_token: 'GetToken',
-  http_request: 'Request',
-  get_this_app: 'ReadApp',
-  update_this_app_settings: 'SaveSettings',
-  check_user_migration: 'CheckMigration',
-};
+const TOOL_LABEL = Object.fromEntries(Object.entries(CATALOG.tools).map(([k, t]) => [k, t.label]));
 
 // A thought summary usually opens with a bold title line; it labels the collapsed block.
 function splitThought(text) {
@@ -57,6 +52,8 @@ function entry(e) {
       return `<li class="cc-tool${e.bad ? ' bad' : ''}"><span class="cc-mark" aria-hidden="true">●</span><div class="cc-body">
         <div class="cc-call">${call}</div>${e.name ? `<div class="cc-result"><span aria-hidden="true">⎿</span>${esc(e.text)}</div>` : ''}</div></li>`;
     }
+    case 'phase':
+      return `<li class="cc-phase${e.bad ? ' bad' : ''}"><span class="cc-mark" aria-hidden="true">◆</span><div class="cc-body"><div class="cc-call">${esc(e.text)}</div></div></li>`;
     case 'approval':
       return `<li class="cc-tool${e.bad ? ' bad' : ''}"><span class="cc-mark" aria-hidden="true">${e.bad ? '✕' : '✓'}</span><div class="cc-body"><div class="cc-call">${esc(e.text)}</div></div></li>`;
     default:
@@ -66,8 +63,7 @@ function entry(e) {
 
 // A change waiting for the admin: the call and what it sends, as the last transcript entry.
 // The decision itself is asked where the composer is (see decisionPanel), as Claude Code does.
-function pendingEntry(a) {
-  const { pending } = a.conversation;
+export function pendingEntries(pending) {
   if (!pending) return '';
   return pending.calls.map((c) => {
     const target = c.name === 'http_request' ? c.title : Object.keys(c.args ?? {}).join(', ');
@@ -78,6 +74,9 @@ function pendingEntry(a) {
   }).join('');
 }
 
+// The transcript rows of a run's log, for this card and the run page.
+export const transcript = (log, pending) => `<ol class="cc-log" aria-live="polite">${log.map(entry).join('')}${pendingEntries(pending)}</ol>`;
+
 const PRESET = (protocol) => `Register this app in CloakTail as a ${LABEL[protocol]} application, fill this app's settings from the result, then set up and check user migration.`;
 
 const textBox = (placeholder) => `<label class="sr-only" for="f-message">Message</label>
@@ -85,13 +84,14 @@ const textBox = (placeholder) => `<label class="sr-only" for="f-message">Message
     <textarea id="f-message" name="message" rows="2" data-enter-submits placeholder="${esc(placeholder)}"></textarea></div>`;
 
 // Replaces the composer while a change waits. Typing an answer declines and tells the agent what
-// to do instead.
-function decisionPanel(a) {
-  const many = a.conversation.pending.calls.length > 1;
-  return `<form method="post" action="/assistant/${a.protocol}/decide" class="cc-composer cc-decide" data-chat data-busy="Working…">
+// to do instead. action: where the form posts.
+// chat: post in the background and update the card in place (the assistant card), or not (a page).
+export function decisionPanel(pending, action, { chat = true } = {}) {
+  const many = pending.calls.length > 1;
+  return `<form method="post" action="${action}" class="cc-composer cc-decide"${chat ? ' data-chat' : ''} data-busy="Working…">
     <div class="cc-decide-head">
       <span><strong>${many ? 'Make these changes?' : 'Make this change?'}</strong>
-        <span class="small muted">Nothing is sent or saved until you approve.</span></span>
+        <span class="small muted">Nothing is sent or saved until you approve. The run waits, even across restarts.</span></span>
       <span class="row">
         <button class="btn primary sm" name="decision" value="approve">${icon('check')}Approve</button>
         <button class="btn sm" name="decision" value="decline">${icon('x')}Decline</button>
@@ -102,48 +102,69 @@ function decisionPanel(a) {
   </form>`;
 }
 
+const FINAL = ['SUCCESS', 'ERROR', 'CANCELLED', 'MAX_RECOVERY_ATTEMPTS_EXCEEDED'];
+
 function composer(a) {
-  const { conversation: c, protocol } = a;
-  if (c.pending) return decisionPanel(a);
+  const { run, protocol } = a;
+  const st = run?.state;
+  if (st?.pending && st.status === 'waiting_approval') return decisionPanel(st.pending, `/assistant/${protocol}/decide`);
+  if (run && FINAL.includes(run.status)) {
+    return `<div class="cc-composer cc-ended"><span class="small muted">This run has ended. Start a new conversation to go on; the run stays on the <a href="/admin/workflows/${esc(run.id)}">Workflows</a> page.</span>
+      <form class="inline" method="post" action="/assistant/${protocol}/reset" data-chat><button class="btn sm">${icon('refresh')}New conversation</button></form></div>`;
+  }
+  const working = run && (!st || st.status === 'running');
   return `<form method="post" action="/assistant/${protocol}/message" class="cc-composer" data-chat data-busy="Thinking…">
-      ${textBox('e.g. Register this app as "Acme Bank (test)"')}
+      ${textBox(working ? 'Working… you can type the next message' : 'e.g. Register this app as "Acme Bank (test)"')}
       <div class="cc-actions">
-        <span class="small muted">Enter to send · Shift+Enter for a new line</span>
+        <span class="small muted">${working ? `${icon('refresh')} Working: this card refreshes by itself` : 'Enter to send · Shift+Enter for a new line'}</span>
         <span class="row">
-          ${c.log.length ? '' : `<button class="btn sm" name="preset" value="${esc(PRESET(protocol))}">${icon('play')}Register this app</button>`}
+          ${run ? '' : `<button class="btn sm" name="preset" value="${esc(PRESET(protocol))}">${icon('play')}Register this app</button>`}
           <button class="btn primary sm" data-needs-text>${icon('arrow')}Send</button>
         </span>
       </div></form>`;
 }
 
-// One chat window: connection bar, transcript (with any pending change last), composer.
+// The phases of the run, as a compact strip.
+export function phaseStrip(st) {
+  if (!st?.phases?.length) return '';
+  return `<ol class="wf-strip" aria-label="Workflow phases">${st.phases.map((p, i) => `<li class="${esc(p.status)}${i === st.phase && st.status !== 'done' ? ' current' : ''}" title="${esc(`${p.title}: ${p.status}${p.summary ? `. ${p.summary}` : ''}`)}">
+    <span class="wf-dot" aria-hidden="true">${p.status === 'done' ? icon('check') : p.status === 'skipped' ? '–' : i + 1}</span><span class="wf-name">${esc(p.title)}</span></li>`).join('')}</ol>`;
+}
+
+// One chat window: connection bar, phases, transcript (with any pending change last), composer.
 function chatWindow(a) {
-  const { connection: conn, conversation: c, protocol } = a;
+  const { connection: conn, run, protocol } = a;
+  const st = run?.state;
   const token = conn.token
     ? `<span${conn.token.scope ? ` title="Scopes: ${esc(conn.token.scope)}"` : ''}>${badge('Token obtained', 'ok')}</span>${conn.token.expiresAt ? ` <span class="small">expires ${time(new Date(conn.token.expiresAt).toISOString())}</span>` : ''}`
     : `<span title="The agent asks this app for one.">${badge('No token yet')}</span>`;
-  const log = c.log.length || c.pending
-    ? `<ol class="cc-log" aria-live="polite">${c.log.map(entry).join('')}${pendingEntry(a)}</ol>`
-    : `<div class="cc-log cc-empty"><p>Ask it to register this app, or to check an existing registration. It reads the reference first, asks you before each change, then fills the settings below.</p></div>`;
-  return `<div class="cc-window">
+  const log = st?.log?.length || st?.pending
+    ? transcript(st.log, st.status === 'waiting_approval' ? st.pending : null)
+    : `<div class="cc-log cc-empty"><p>${run ? 'Starting the run…' : 'Ask it to register this app, or to check an existing registration. It works through the phases of the workflow, asks you before each change, then fills the settings below.'}</p></div>`;
+  const polling = run && !FINAL.includes(run.status) && (!st || st.status === 'running');
+  return `<div class="cc-window"${polling ? ' data-poll' : ''}>
     <div class="cc-head">
       <span class="cc-status-info"><span class="dot ok" aria-hidden="true"></span>Connected as ${code(conn.clientId)} to
         <a href="${esc(conn.referenceUrl)}" target="_blank" rel="noopener"><code>${esc(conn.referenceUrl)}</code>${icon('external')}</a> ${token}</span>
       <span class="row">
-        ${c.log.length ? `<form class="inline" method="post" action="/assistant/${protocol}/reset" data-chat><button class="btn ghost sm">${icon('refresh')}New conversation</button></form>` : ''}
-        <form class="inline" method="post" action="/assistant/${protocol}/disconnect" data-chat data-confirm="Disconnect from CloakTail? Both conversations are forgotten; the saved API credential is kept."><button class="btn ghost sm">${icon('logout')}Disconnect</button></form>
+        ${run ? `<a class="btn ghost sm" href="/admin/workflows/${esc(run.id)}">${icon('sliders')}Workflow run</a>` : ''}
+        ${run && !FINAL.includes(run.status) ? `<form class="inline" method="post" action="/assistant/${protocol}/reset" data-chat data-confirm="Stop this run and start over? Its saved steps stay on the Workflows page."><button class="btn ghost sm">${icon('refresh')}New conversation</button></form>` : ''}
+        <form class="inline" method="post" action="/assistant/${protocol}/disconnect" data-chat data-confirm="Disconnect from CloakTail? A run already started keeps going; the saved API credential is kept."><button class="btn ghost sm">${icon('logout')}Disconnect</button></form>
       </span>
     </div>
+    ${phaseStrip(st)}
     ${log}
     ${composer(a)}
   </div>`;
 }
 
 export function assistantCard(a, draft) {
-  const description = `Does steps 2 to 4 for you, then sets up <a href="/admin/migrate">user migration</a>: an AI agent (Google Gemini, <code>${esc(a.model)}</code>) registers this app in CloakTail as a ${LABEL[a.protocol]} application, using only the CloakTail API reference you give it, and fills this app's settings. You approve every change. Or skip it and follow the steps by hand.`;
+  const description = `Does steps 2 to 4 for you, then sets up <a href="/admin/migrate">user migration</a>: an AI agent (Google Gemini, <code>${esc(a.model)}</code>) registers this app in CloakTail as a ${LABEL[a.protocol]} application, using only the CloakTail API reference you give it, and fills this app's settings. It runs as a durable <a href="/admin/workflows">workflow</a>: every step is saved, so a restart doesn't lose it. You approve every change. Or skip it and follow the steps by hand.`;
   let body;
   if (!a.enabled) {
     body = alert('info', 'The assistant is off', ['Set <code>GEMINI_API_KEY</code> and <code>GEMINI_MODEL</code> in <code>.env</code> and restart to turn it on.']);
+  } else if (!a.engine.ok) {
+    body = alert('info', 'Workflows are off', [esc(a.engine.reason), 'The assistant runs as a durable workflow, saved in Postgres. See "Workflows" in the README.']);
   } else if (!a.connection) {
     body = connectForm(a, draft);
   } else {

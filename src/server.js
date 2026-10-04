@@ -14,9 +14,14 @@ import * as migration from './migration.js';
 import * as legacy from './legacyUsers.js';
 import * as assistant from './assistant.js';
 import * as credentials from './apiCredentials.js';
+import * as engine from './workflow/engine.js';
+import * as registration from './workflow/registration.js';
+import * as userMigration from './workflow/userMigration.js';
+import { DEFINITIONS, REGISTRATION, USER_MIGRATION } from './workflow/definitions.js';
 import { adminHomePage, samlPage, oidcPage, certsPage, usersPage } from './views/pages.js';
 import { migrationPage } from './views/migration.js';
 import { apiCredentialsPage } from './views/apiCredentials.js';
+import { workflowsPage, runPage } from './views/workflow.js';
 import { homePage, legacyPage, redirectToCloakTail, errorPage } from './views/customer.js';
 
 // ---------- key pairs ----------
@@ -225,10 +230,10 @@ app.get('/', (req, res) => render(req, res, homePage, { profile: getProfile(req.
 // Admin console: everything that changes how the app signs customers in.
 app.get('/admin', (req, res) => render(req, res, adminHomePage, { keys, profileCount: listProfiles().length }));
 
-app.get('/admin/saml', (req, res) => render(req, res, samlPage, { settings: getSettings(), keys, assistant: assistantView(req, 'saml') }));
+app.get('/admin/saml', async (req, res) => render(req, res, samlPage, { settings: getSettings(), keys, assistant: await assistantView(req, 'saml') }));
 
 app.get('/admin/oidc', async (req, res) => {
-  render(req, res, oidcPage, { settings: getSettings(), discovery: await oidc.discoveryStatus(active.oidc), assistant: assistantView(req, 'oidc') });
+  render(req, res, oidcPage, { settings: getSettings(), discovery: await oidc.discoveryStatus(active.oidc), assistant: await assistantView(req, 'oidc') });
 });
 
 app.get('/admin/certs', (req, res) => render(req, res, certsPage, { keys, keyErrors }));
@@ -453,7 +458,8 @@ app.get('/saml/metadata', (req, res) => {
 // ---------- settings ----------
 
 // Applies new settings, creates any key pair they need, and checks the IdP is reachable.
-async function applySettings(req, sections, apply, label) {
+// Returns { kind, notes } for the message: kind 'ok' or 'warn'.
+async function applySettingsQuietly(sections, apply) {
   apply();
   const notes = [];
   let kind = 'ok';
@@ -480,6 +486,11 @@ async function applySettings(req, sections, apply, label) {
       notes.push(`Could not read the discovery document: ${status.error}`);
     }
   }
+  return { kind, notes };
+}
+
+async function applySettings(req, sections, apply, label) {
+  const { kind, notes } = await applySettingsQuietly(sections, apply);
   setFlash(req, kind, label, notes);
 }
 
@@ -585,20 +596,19 @@ app.post('/api-credentials/token', sameOrigin, async (req, res) => {
 
 app.post('/api-credentials/delete', sameOrigin, (req, res) => {
   credentials.deleteCredentials();
-  delete req.session.cloaktail; // the assistant can't call CloakTail without it
+  delete req.session.cloaktail; // the assistant can't start a run without it
   setFlash(req, 'ok', 'API credential deleted.');
   res.redirect('/admin/api');
 });
 
-// ---------- registration assistant (see assistant.js) ----------
+// ---------- registration assistant (see assistant.js and workflow/registration.js) ----------
 
-// The CloakTail connection (reference URL, secret handles) is shared by both pages and kept only in
-// this in-memory session; each protocol has its own conversation. The API credential and token are
-// in apiCredentials.js.
-const conversation = (req, protocol) => {
-  req.session.assistant ??= {};
-  return (req.session.assistant[protocol] ??= assistant.newConversation());
-};
+// The assistant runs as a durable workflow (DBOS): one run per conversation, saved in Postgres, so
+// it survives restarts and waits for approvals as long as needed. The CloakTail connection (the
+// reference URL) is kept in this session until a run starts; the run keeps its own copy.
+
+// How long a page request waits for the run to stop working before showing it as it is.
+const RUN_WAIT_MS = 90_000;
 
 // What the agent registers: this app's own values for the protocol, and its current settings.
 // User migration, for the assistant: what to register in CloakTail and what is set here.
@@ -666,56 +676,73 @@ function localValues(protocol) {
   };
 }
 
+// What the workflow's steps need from the app.
+registration.setHost({
+  local: localValues,
+  // The outcome goes back to the agent and into the transcript, not to a page-top flash.
+  save: async (section, values) => {
+    const { notes } = await applySettingsQuietly([section], () => saveSettings(section, { ...getSettings(), ...values }));
+    return { saved: Object.keys(values), configured: isConfigured(section), notes };
+  },
+  // The Migration page's "Check request", for the first legacy user. Creates no users.
+  checkMigration: async () => {
+    const problems = migrationProblems();
+    if (problems.length) return { ok: false, problems };
+    const user = legacy.listLegacyUsers()[0];
+    if (!user) return { ok: false, problems: ['No legacy users to build a request for.'] };
+    const built = migration.buildRequest(active.migration, user, migration.newState());
+    const answer = await migration.check(built.token);
+    migration.logEvent('check', { user: user.username, detail: answer.body.ok ? 'ok' : answer.body.error?.code });
+    return { ok: Boolean(answer.body.ok), user: user.username, request_claims: built.claims, cloaktail: answer.body };
+  },
+  // A phase's postcondition (CATALOG.checks in workflow/definitions.js). { ok, reason }
+  check: async (name, { protocol, facts }) => {
+    if (name === 'signin_configured') {
+      return isConfigured(protocol) ? { ok: true } : { ok: false, reason: `this app's ${protocol === 'oidc' ? 'OpenID Connect' : 'SAML'} settings are still incomplete.` };
+    }
+    if (name === 'migration_configured') {
+      const problems = migrationProblems();
+      return problems.length ? { ok: false, reason: problems.join(' ') } : { ok: true };
+    }
+    if (name === 'migration_check_passed') {
+      return facts.migrationCheckOk ? { ok: true } : { ok: false, reason: 'CloakTail has not accepted a check_user_migration request yet.' };
+    }
+    return { ok: false, reason: `unknown check ${name}.` };
+  },
+});
+
+// The run the protocol page shows: the newest, unless the admin started over after it finished.
+async function currentRun(req, protocol) {
+  if (!engine.isReady()) return null;
+  const [run] = await engine.listRuns(registration.WORKFLOW_NAME, { attributes: { protocol }, limit: 1 });
+  if (!run || (engine.isFinal(run.status) && req.session.assistantDismissed?.[protocol] === run.id)) return null;
+  return run;
+}
+
 // What the page shows: never the credential, the token or the secrets.
-function assistantView(req, protocol) {
+async function assistantView(req, protocol) {
   const conn = req.session.cloaktail;
   const cred = credentials.credentialsView();
+  const run = await currentRun(req, protocol);
+  const referenceUrl = run?.state?.referenceUrl ?? conn?.referenceUrl;
   return {
     protocol,
     enabled: assistant.isEnabled(),
-    model: config.gemini.model,
+    model: assistant.modelName(),
+    engine: engine.engineStatus(),
     credentials: cred,
     defaultReferenceUrl: config.cloaktail.referenceUrl || (cred.saved ? `${cred.cloaktailUrl}${credentials.AGENT_GUIDE_PATH}` : ''),
-    connection: conn && { referenceUrl: conn.referenceUrl, clientId: cred.clientId, token: cred.token },
-    conversation: req.session.assistant?.[protocol] ?? assistant.newConversation(),
-  };
-}
-
-function assistantContext(req, protocol) {
-  return {
-    state: conversation(req, protocol),
-    protocol,
-    conn: req.session.cloaktail,
-    local: localValues,
-    // The outcome goes back to the agent and into the transcript, not to a page-top flash.
-    save: async (section, values) => {
-      await applySettings(req, [section], () => saveSettings(section, { ...getSettings(), ...values }), 'Settings saved.');
-      const notes = req.session.flash?.notes ?? [];
-      delete req.session.flash;
-      return { saved: Object.keys(values), configured: isConfigured(section), notes };
-    },
-    // The Migration page's "Check request", for the first legacy user. Creates no users.
-    checkMigration: async () => {
-      const problems = migrationProblems();
-      if (problems.length) return { ok: false, problems };
-      const user = legacy.listLegacyUsers()[0];
-      if (!user) return { ok: false, problems: ['No legacy users to build a request for.'] };
-      const built = migration.buildRequest(active.migration, user, migration.newState());
-      const answer = await migration.check(built.token);
-      migration.logEvent('check', { user: user.username, detail: answer.body.ok ? 'ok' : answer.body.error?.code });
-      return { ok: Boolean(answer.body.ok), user: user.username, request_claims: built.claims, cloaktail: answer.body };
-    },
+    connection: referenceUrl && { referenceUrl, clientId: cred.clientId, token: cred.token },
+    run,
   };
 }
 
 for (const protocol of ['saml', 'oidc']) {
   const back = `/admin/${protocol}#assistant`;
-  const ready = (req, res) => {
-    if (!assistant.isEnabled() || !req.session.cloaktail || !credentials.hasCredentials()) {
-      res.redirect(back);
-      return false;
-    }
-    return true;
+  const usable = (res) => {
+    if (assistant.isEnabled() && engine.isReady() && credentials.hasCredentials()) return true;
+    res.redirect(back);
+    return false;
   };
 
   app.post(`/assistant/${protocol}/connect`, sameOrigin, async (req, res, next) => {
@@ -728,33 +755,94 @@ for (const protocol of ['saml', 'oidc']) {
     res.redirect(back);
   });
 
+  // Starts a run with the message, or passes the message to the running one.
   app.post(`/assistant/${protocol}/message`, sameOrigin, async (req, res) => {
-    if (!ready(req, res)) return;
-    try {
-      await assistant.send(assistantContext(req, protocol), req.body.preset || req.body.message);
-    } catch (err) {
-      conversation(req, protocol).log.push({ kind: 'error', text: err.message });
+    if (!usable(res)) return;
+    const text = String(req.body.preset || req.body.message || '').trim();
+    if (!text) return res.redirect(back);
+    const run = await currentRun(req, protocol);
+    if (run && !engine.isFinal(run.status)) {
+      await engine.send(run.id, { type: 'message', text });
+      await engine.waitForIdle(run.id, { after: run.state?.v ?? 0, timeoutMs: RUN_WAIT_MS });
+    } else if (req.session.cloaktail) {
+      const { referenceUrl, origin } = req.session.cloaktail;
+      const id = await registration.start({ protocol, referenceUrl, origin, message: text });
+      await engine.waitForIdle(id, { timeoutMs: RUN_WAIT_MS });
     }
     res.redirect(back);
   });
 
   app.post(`/assistant/${protocol}/decide`, sameOrigin, async (req, res) => {
-    if (!ready(req, res)) return;
-    await assistant.decide(assistantContext(req, protocol), req.body.decision === 'approve', req.body.message);
+    if (!usable(res)) return;
+    const run = await currentRun(req, protocol);
+    if (run?.state?.status === 'waiting_approval') {
+      await engine.send(run.id, { type: 'decision', approve: req.body.decision === 'approve', note: req.body.message });
+      await engine.waitForIdle(run.id, { after: run.state.v, timeoutMs: RUN_WAIT_MS });
+    }
     res.redirect(back);
   });
 
-  app.post(`/assistant/${protocol}/reset`, sameOrigin, (req, res) => {
-    if (req.session.assistant) delete req.session.assistant[protocol];
+  // New conversation: stops the current run if it is still going.
+  app.post(`/assistant/${protocol}/reset`, sameOrigin, async (req, res) => {
+    const run = await currentRun(req, protocol);
+    if (run) {
+      if (!engine.isFinal(run.status)) await engine.cancel(run.id);
+      (req.session.assistantDismissed ??= {})[protocol] = run.id;
+    }
     res.redirect(back);
   });
 
+  // Forgets the reference URL in this session. Runs already started keep going.
   app.post(`/assistant/${protocol}/disconnect`, sameOrigin, (req, res) => {
     delete req.session.cloaktail;
-    delete req.session.assistant;
     res.redirect(back);
   });
 }
+
+// ---------- workflows (see workflow/) ----------
+
+const RUN_ID = /^[a-z0-9-]{1,80}$/;
+
+app.get('/admin/workflows', async (req, res) => {
+  render(req, res, workflowsPage, {
+    engine: engine.engineStatus(),
+    definitions: [REGISTRATION, USER_MIGRATION],
+    runs: {
+      [REGISTRATION.id]: await engine.listRuns(registration.WORKFLOW_NAME, { limit: 20 }),
+      [USER_MIGRATION.id]: await engine.listRuns(userMigration.WORKFLOW_NAME, { limit: 20 }),
+    },
+  });
+});
+
+app.get('/admin/workflows/:id', async (req, res, next) => {
+  const run = RUN_ID.test(req.params.id) ? await engine.getRun(req.params.id) : null;
+  if (!run) return next();
+  const definition = DEFINITIONS[run.name === registration.WORKFLOW_NAME ? REGISTRATION.id : USER_MIGRATION.id];
+  render(req, res, runPage, { run, definition, engine: engine.engineStatus() });
+});
+
+// Approve or decline, send a message, stop or resume, from the run's page.
+app.post('/admin/workflows/:id/:action', sameOrigin, async (req, res, next) => {
+  const { id, action } = req.params;
+  const run = RUN_ID.test(id) ? await engine.getRun(id) : null;
+  if (!run) return next();
+  const back = `/admin/workflows/${id}`;
+  const after = run.state?.v ?? 0;
+  if (action === 'decide' && run.state?.status === 'waiting_approval') {
+    await engine.send(id, { type: 'decision', approve: req.body.decision === 'approve', note: req.body.message });
+    await engine.waitForIdle(id, { after, timeoutMs: RUN_WAIT_MS });
+  } else if (action === 'message' && !engine.isFinal(run.status) && String(req.body.message ?? '').trim()) {
+    await engine.send(id, { type: 'message', text: String(req.body.message).trim() });
+    await engine.waitForIdle(id, { after, timeoutMs: RUN_WAIT_MS });
+  } else if (action === 'cancel' && !engine.isFinal(run.status)) {
+    await engine.cancel(id);
+    setFlash(req, 'ok', 'Run stopped.', ['Its saved steps are kept. Resume carries on from the last one.']);
+  } else if (action === 'resume' && ['CANCELLED', 'ERROR', 'MAX_RECOVERY_ATTEMPTS_EXCEEDED'].includes(run.status)) {
+    await engine.resume(id);
+    setFlash(req, 'ok', 'Run resumed from its last saved step.');
+  }
+  res.redirect(back);
+});
 
 // ---------- user migration through CloakTail ----------
 
@@ -796,14 +884,46 @@ function legacySignIn(req, res, next, user, outcome) {
   });
 }
 
+// Starts the durable run that follows this user's migration (workflow/userMigration.js), if
+// workflows are on. Returns its id, kept in the pre-login session for /migrate/return.
+async function trackMigration(user, jti) {
+  if (!engine.isReady()) return null;
+  try {
+    return await userMigration.start({ userId: user.id, username: user.username, jti });
+  } catch (err) {
+    console.error(`Migration run for ${user.username} not started: ${err.message}`);
+    return null;
+  }
+}
+
+// Tells the user's migration run what the return URL made of the result. Never blocks the user.
+function reportMigration(pending, status, detail) {
+  if (!pending?.workflowId || !engine.isReady()) return;
+  userMigration.report(pending.workflowId, status, detail)
+    .catch((err) => console.error(`Migration run ${pending.workflowId} not told: ${err.message}`));
+}
+
+// The run's host: the spec's status check, for a user who never came back.
+userMigration.setHost({
+  recover: async (userId) => {
+    const user = legacy.getLegacyUser(userId);
+    if (!user) return { migrated: false, detail: 'the user no longer exists' };
+    if (legacy.isMigrated(user)) return { migrated: true, detail: 'already marked migrated here' };
+    if (migrationProblems().length) return { migrated: false, detail: 'migration is not set up here any more' };
+    const recovered = await recoverMigration(user);
+    return recovered ? { migrated: true, detail: 'confirmed by CloakTail /migrate/status' } : { migrated: false, detail: 'CloakTail /migrate/status has no migration for them' };
+  },
+});
+
 // Not migrated yet: no session. Keep state + user id in a pre-login session and hand the browser
 // a signed request, auto-posted to CloakTail.
-function startMigration(req, res, next, user) {
+async function startMigration(req, res, next, user) {
   const state = migration.newState();
   const { token, claims } = migration.buildRequest(active.migration, user, state);
+  const workflowId = await trackMigration(user, claims.jti);
   req.session.regenerate((err) => {
     if (err) return next(err);
-    req.session.migrationPending = { state, userId: user.id, startedAt: Date.now() };
+    req.session.migrationPending = { state, userId: user.id, startedAt: Date.now(), workflowId };
     legacy.recordMigrationStarted(user.id);
     migration.logEvent('started', { user: user.username, detail: `jti ${claims.jti}` });
     res.set('Cache-Control', 'no-store').type('html').send(redirectToCloakTail({ token, user }));
@@ -910,7 +1030,7 @@ app.post('/legacy/login', sameOrigin, async (req, res, next) => {
       adminDetail: problems,
     });
   }
-  startMigration(req, res, next, user);
+  await startMigration(req, res, next, user);
 });
 
 // The return URL. Rejects anything that fails a check: no session, no change to the user.
@@ -919,6 +1039,7 @@ app.get('/migrate/return', (req, res, next) => {
   delete req.session.migrationPending; // single use, whatever happens next
   const reject = (reason) => {
     migration.logEvent('rejected', { user: pending ? legacy.getLegacyUser(pending.userId)?.username : null, detail: reason });
+    reportMigration(pending, 'rejected', reason);
     req.session.regenerate(() => {
       setFlash(req, 'bad', 'We couldn\'t finish signing you in. Please sign in again.');
       res.redirect('/legacy');
@@ -947,6 +1068,7 @@ app.get('/migrate/return', (req, res, next) => {
     status: claims.status,
     detail: [claims.simulated && 'simulated', status !== claims.status && `handled as ${status}`, claims.error_description].filter(Boolean).join('; ') || null,
   });
+  reportMigration(pending, status, [claims.simulated && 'simulated', claims.error_description].filter(Boolean).join('; ') || null);
 
   if (status === 'created' || status === 'already_migrated') {
     legacy.markMigrated(user.id, { keycloakId: claims.keycloak_id, keycloakUsername: claims.preferred_username });
@@ -1024,7 +1146,7 @@ app.post('/migrate/test', sameOrigin, async (req, res) => {
   });
   const redirectUrl = answer.body.redirect_url;
   if (isSimulate && answer.body.ok && typeof redirectUrl === 'string' && redirectUrl.startsWith(`${active.migration.returnUrl}?`)) {
-    req.session.migrationPending = { state, userId: user.id, startedAt: Date.now() };
+    req.session.migrationPending = { state, userId: user.id, startedAt: Date.now(), workflowId: await trackMigration(user, built.claims.jti) };
     return res.redirect(redirectUrl);
   }
   req.session.migrationCheck = { username: user.username, claims: built.claims, header: built.header, body: answer.body };
@@ -1114,8 +1236,12 @@ app.use((err, req, res, next) => {
   res.status(500).type('html').send(errorPage({ status: 500, message: err.message }));
 });
 
+// DBOS resumes the runs a previous process left unfinished. The hosts above are set by now.
+await engine.launch();
+
 app.listen(config.port, () => {
   console.log(`Test SP on ${active.baseUrl}`);
+  console.log(`  Workflows:          ${engine.isReady() ? `on (${engine.engineStatus().database})` : `off: ${engine.engineStatus().reason}`}`);
   console.log(`  SAML  entity ID:    ${active.sp.entityId}${isConfigured('saml') ? '' : ' (IdP not configured)'}`);
   console.log(`        ACS URL:      ${active.sp.acsUrl}`);
   console.log(`  OIDC  client ID:    ${active.oidc.clientId || '(not configured)'}`);

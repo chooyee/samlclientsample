@@ -344,6 +344,49 @@ details.more[open] > summary { margin-bottom: 12px; }
 .cc-live .cc-mark { color: var(--warn); animation: cc-pulse 1.2s ease-in-out infinite; }
 @keyframes cc-pulse { 50% { opacity: .3; } }
 @media (prefers-reduced-motion: reduce) { .cc-live .cc-mark { animation: none; } }
+.cc-phase .cc-mark { color: var(--accent); font-size: 11px; }
+.cc-phase .cc-call { color: var(--accent); font-weight: 600; }
+.cc-phase.bad .cc-mark, .cc-phase.bad .cc-call { color: var(--warn); }
+.cc-composer.cc-ended { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+
+/* Workflows: phases of a definition or run, and the assistant's compact strip */
+.wf-strip { display: flex; gap: 4px; margin: 0; padding: 8px 10px; list-style: none; overflow-x: auto; border-bottom: 1px solid var(--line); background: var(--surface); }
+.wf-strip li { display: flex; align-items: center; gap: 6px; flex: none; padding: 3px 9px 3px 4px; border-radius: 999px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.wf-strip li.current { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.wf-strip li.blocked { background: var(--warn-soft); color: var(--warn); }
+.wf-dot { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--surface-2); border: 1px solid var(--line-strong); font-size: 10.5px; font-weight: 700; }
+.wf-dot .icon { width: 11px; height: 11px; }
+.wf-strip li.done .wf-dot { background: var(--ok); border-color: var(--ok); color: var(--surface); }
+.wf-strip li.current .wf-dot { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.wf-phases { list-style: none; margin: 0; padding: 0; display: grid; }
+.wf-phase { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 12px; padding: 0 0 18px; }
+.wf-phase:not(:last-child)::before { content: ""; position: absolute; left: 13px; top: 30px; bottom: 2px; width: 2px; background: var(--line); }
+.wf-phase.done:not(:last-child)::before { background: var(--ok); }
+.wf-num { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 12.5px; }
+.wf-num .icon { width: 14px; height: 14px; }
+.wf-phase.pending .wf-num, .wf-phase.skipped .wf-num { background: var(--surface-2); color: var(--muted); border: 1px solid var(--line-strong); }
+.wf-phase.done .wf-num { background: var(--ok); color: var(--surface); }
+.wf-phase.current .wf-num { background: var(--accent); color: var(--accent-fg); box-shadow: 0 0 0 4px var(--accent-soft); }
+.wf-phase.blocked .wf-num, .wf-phase.failed .wf-num { background: var(--warn-soft); color: var(--warn); }
+.wf-main { min-width: 0; padding-top: 3px; }
+.wf-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.wf-goal { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.wf-summary { margin: 4px 0 0; padding: 6px 10px; border-left: 3px solid var(--accent); background: var(--surface-2); border-radius: 0 6px 6px 0; font-size: 13px; }
+.wf-phase.pending .wf-title strong { color: var(--muted); }
+.wf-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.wf-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border: 1px solid var(--line-strong); border-radius: 6px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.wf-chip .icon { width: 12px; height: 12px; }
+.wf-chip.approve { border-color: transparent; background: var(--ok-soft); color: var(--ok); font-family: inherit; }
+.wf-chip.check { border-color: transparent; background: var(--info-soft); color: var(--info); font-family: inherit; }
+.wf-chip.warn { border-color: transparent; background: var(--warn-soft); color: var(--warn); font-family: inherit; }
+.wf-next { display: grid; gap: 8px; margin-top: 8px; padding: 14px; border: 1px dashed var(--line-strong); border-radius: var(--radius); background: var(--surface-2); }
+.wf-next strong { display: inline-flex; align-items: center; gap: 6px; }
+.wf-next p { margin: 0; }
+.wf-json { margin-top: 12px; }
+.wf-json summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.wf-json .code { margin-top: 8px; }
+.wf-h3 { margin: 22px 0 10px; font-size: 14px; }
+.badge.info { background: var(--info-soft); color: var(--info); }
 .cc-thinking .cc-mark { color: var(--warn); }
 .cc-thinking summary { cursor: pointer; color: var(--muted); font-style: italic; list-style: none; }
 .cc-thinking summary::-webkit-details-marker { display: none; }
@@ -515,7 +558,35 @@ export const script = `
     if (next) next.focus({ preventScroll: true });
     const win = card.querySelector('.cc-window');
     if (win) win.scrollIntoView({ block: 'nearest' });
+    poll();
   };
+
+  // A workflow run that is working ([data-poll]): reload what the page shows every few seconds
+  // until it waits for someone or ends. Skipped while the admin is typing or the tab is hidden.
+  let polling = false;
+  function poll() {
+    if (polling || !document.querySelector('[data-poll]')) return;
+    polling = true;
+    setTimeout(async () => {
+      polling = false;
+      const typing = document.activeElement && document.activeElement.matches('input, textarea') && document.activeElement.value;
+      const busy = document.querySelector('#assistant[aria-busy="true"]');
+      if (document.hidden || typing || busy) return poll();
+      try {
+        const res = await fetch(location.href, { credentials: 'same-origin' });
+        const main = res.ok && new DOMParser().parseFromString(await res.text(), 'text/html').querySelector('main');
+        if (main) {
+          const y = window.scrollY;
+          document.querySelector('main').replaceWith(main);
+          window.scrollTo(0, y);
+          for (const log of document.querySelectorAll('.cc-log')) log.scrollTop = log.scrollHeight;
+          syncSend(document);
+          relative();
+        }
+      } catch (err) { /* try again on the next tick */ }
+      poll();
+    }, 2500);
+  }
 
   function swapIn(doc) {
     const next = doc.getElementById('assistant');
@@ -597,6 +668,7 @@ export const script = `
 
   syncSend(document);
   for (const log of document.querySelectorAll('.cc-log')) log.scrollTop = log.scrollHeight;
+  poll();
 })();
 `;
 
@@ -610,6 +682,8 @@ const NAV = [
   { href: '/admin/oidc', label: 'OpenID Connect', icon: 'globe', section: 'oidc' },
   { group: 'User migration' },
   { href: '/admin/migrate', label: 'Migration setup', icon: 'migrate', section: 'migration' },
+  { group: 'Automation' },
+  { href: '/admin/workflows', label: 'Workflows', icon: 'sliders' },
   { group: 'App' },
   { href: '/admin/api', label: 'API credentials', icon: 'code' },
   { href: '/admin/certs', label: 'Certificates', icon: 'key' },

@@ -60,6 +60,13 @@ export const config = {
     apiKey: process.env.GEMINI_API_KEY || '',
     model: process.env.GEMINI_MODEL || '',
   },
+  // Durable workflows (DBOS, see workflow/engine.js): the registration assistant and user
+  // migration tracking. Off unless a Postgres URL is set.
+  workflows: {
+    databaseUrl: process.env.DBOS_SYSTEM_DATABASE_URL || '',
+    // Runs resume only on the same version: bump it when a workflow's steps change order.
+    version: process.env.DBOS_APP_VERSION || 'testsp-workflows-1',
+  },
   migrationKeyFile: process.env.MIGRATION_KEY_FILE || 'certs/migration-key.pem',
   // Results from POST /migrate/simulate carry simulated: true. Accepted only while testing.
   acceptSimulated: flag('MIGRATION_ACCEPT_SIMULATED', process.env.NODE_ENV !== 'production'),

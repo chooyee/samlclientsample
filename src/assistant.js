@@ -10,17 +10,17 @@
 // - The credential, the token and any secret in a response stay on this server. The model sees
 //   secrets as [secret:N] handles, which the server substitutes when the agent saves or sends them.
 // - Requests that change something, and changes to this app's settings, wait for the admin.
+//
+// This module has the tools and one model turn. The loop that runs them, phase by phase, as a
+// durable workflow that survives restarts, is workflow/registration.js.
 import { GoogleGenAI } from '@google/genai';
 import { config } from './config.js';
 import * as credentials from './apiCredentials.js';
 
-const MAX_STEPS = 12; // model calls per message or approval
 const MAX_TEXT = 200_000; // characters of a fetched document passed to the model
 const TIMEOUT_MS = 20_000;
 const WRITE_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
 const SECRET_NAME = /secret|password|passwd|private_?key|access_?token|refresh_?token|id_?token|api_?key/i;
-
-export const isEnabled = () => Boolean(config.gemini.apiKey && config.gemini.model);
 
 let ai = null;
 const gemini = () => (ai ??= new GoogleGenAI({ apiKey: config.gemini.apiKey }));
@@ -163,9 +163,9 @@ const SETTING_DOCS = {
 // Which settings section each setting is saved in.
 const sectionOf = (protocol, key) => (Object.hasOwn(SETTING_DOCS.migration, key) ? 'migration' : Object.hasOwn(SETTING_DOCS[protocol], key) ? protocol : null);
 
-function declarations(protocol) {
+function declarations(protocol, names) {
   const settings = { ...SETTING_DOCS[protocol], ...SETTING_DOCS.migration };
-  return [
+  const all = [
     {
       name: 'fetch_reference',
       description: 'GET a document from the CloakTail server: the reference URL (read it first), or a document it points to, such as an OpenAPI description. Relative URLs resolve against the reference URL. Only the reference URL\'s server can be reached.',
@@ -208,9 +208,25 @@ function declarations(protocol) {
       parametersJsonSchema: { type: 'object', properties: {} },
     },
   ];
+  return [
+    ...all.filter((d) => names.includes(d.name)),
+    {
+      name: 'finish_phase',
+      description: 'Say the current phase is over. outcome "done" when its goal is met (code may check it and send you back), "skipped" only when the admin asked to skip an optional phase, "blocked" when you need the admin before you can go on. The next phase starts after "done" or "skipped".',
+      parametersJsonSchema: {
+        type: 'object',
+        properties: {
+          outcome: { type: 'string', enum: ['done', 'skipped', 'blocked'] },
+          summary: { type: 'string', description: 'One or two sentences: what was done, or what is needed.' },
+        },
+        required: ['outcome', 'summary'],
+      },
+    },
+  ];
 }
 
-const needsApproval = (call) => call.name === 'update_this_app_settings'
+// Whether a call changes something, and so waits for the admin under the "changes" approval rule.
+export const isChange = (call) => call.name === 'update_this_app_settings'
   || (call.name === 'http_request' && WRITE_METHODS.includes(String(call.args?.method).toUpperCase()));
 
 // What the admin is asked to approve.
@@ -226,6 +242,7 @@ export function describeCall(call) {
   return { title: 'Change this app\'s settings', detail: Object.entries(a).map(([k, v]) => `${k} = ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n') };
 }
 
+// ctx: { conn, protocol, host: { local, save, checkMigration }, idempotencyKey }
 const tools = {
   async fetch_reference({ url }, { conn }) {
     const res = await request(onReferenceOrigin(conn, url), { headers: { accept: 'text/markdown, application/json, text/plain;q=0.9, */*;q=0.5' } });
@@ -246,7 +263,7 @@ const tools = {
     }
   },
 
-  async http_request({ method, url, json_body: jsonBody }, { conn }) {
+  async http_request({ method, url, json_body: jsonBody }, { conn, idempotencyKey }) {
     const verb = String(method).toUpperCase();
     const target = onReferenceOrigin(conn, url);
     const headers = { accept: 'application/json, text/plain;q=0.9, */*;q=0.5' };
@@ -254,6 +271,8 @@ const tools = {
       throw new AssistantError(err.message);
     });
     if (token) headers.authorization = `Bearer ${token.value}`;
+    // The same key if the step runs again after a crash, for servers that honour it.
+    if (WRITE_METHODS.includes(verb) && idempotencyKey) headers['idempotency-key'] = idempotencyKey;
     let body;
     if (jsonBody && verb !== 'GET') {
       try {
@@ -269,12 +288,12 @@ const tools = {
     return { log: `HTTP ${res.status}`, response };
   },
 
-  async get_this_app(args, { protocol, local }) {
-    return { log: 'Read this app\'s values', response: local(protocol) };
+  async get_this_app(args, { protocol, host }) {
+    return { log: 'Read this app\'s values', response: host.local(protocol) };
   },
 
   // Saves each setting in its section: this protocol's, or user migration's.
-  async update_this_app_settings(args, { conn, protocol, save }) {
+  async update_this_app_settings(args, { conn, protocol, host }) {
     const bySection = {};
     for (const [k, v] of Object.entries(args ?? {})) {
       const section = sectionOf(protocol, k);
@@ -284,14 +303,14 @@ const tools = {
       throw new AssistantError(`No known settings given. Known: ${[...Object.keys(SETTING_DOCS[protocol]), ...Object.keys(SETTING_DOCS.migration)].join(', ')}.`);
     }
     const results = {};
-    for (const [section, values] of Object.entries(bySection)) results[section] = await save(section, values);
+    for (const [section, values] of Object.entries(bySection)) results[section] = await host.save(section, values);
     const saved = Object.values(bySection).flatMap(Object.keys);
     const notes = Object.values(results).flatMap((r) => r.notes ?? []);
     return { log: [`Saved: ${saved.join(', ')}`, ...notes].join('\n'), response: results };
   },
 
-  async check_user_migration(args, { checkMigration }) {
-    const result = await checkMigration();
+  async check_user_migration(args, { host }) {
+    const result = await host.checkMigration();
     const log = result.problems ? `Not ready: ${result.problems.length} thing(s) missing here`
       : result.ok ? `CloakTail accepted the request for ${result.user}` : `CloakTail refused it: ${result.cloaktail?.error?.code ?? 'error'}`;
     return { log, response: result };
@@ -299,31 +318,29 @@ const tools = {
 };
 
 // What a call acts on, shown next to its name in the transcript.
-function callTarget({ name, args = {} }) {
+export function callTarget({ name, args = {} }) {
   if (name === 'fetch_reference') return String(args.url ?? '');
   if (name === 'http_request') return `${String(args.method).toUpperCase()} ${args.url}`;
   if (name === 'update_this_app_settings') return Object.keys(args).join(', ');
   return '';
 }
 
-async function runTool(call, ctx) {
+// Runs one tool call. Never throws: a failure is the response the agent gets.
+// Returns { entry, response }: the transcript row and what goes back to the model.
+export async function runTool(call, ctx) {
   const entry = { kind: 'tool', name: call.name, target: callTarget(call) };
   try {
     const tool = Object.hasOwn(tools, call.name) ? tools[call.name] : null;
     if (!tool) throw new AssistantError(`Unknown tool ${call.name}.`);
     const { log, response } = await tool(call.args ?? {}, ctx);
-    ctx.state.log.push({ ...entry, text: log });
-    return response;
+    return { entry: { ...entry, text: log }, response };
   } catch (err) {
     const message = err instanceof AssistantError ? err.message : `${err.cause?.message || err.message}`;
-    ctx.state.log.push({ ...entry, text: message, bad: true });
-    return { error: message };
+    return { entry: { ...entry, text: message, bad: true }, response: { error: message } };
   }
 }
 
-// ---------- conversation ----------
-
-export const newConversation = () => ({ contents: [], log: [], pending: null });
+// ---------- the model ----------
 
 const PROTOCOL_LABEL = { saml: 'SAML 2.0', oidc: 'OpenID Connect' };
 
@@ -332,107 +349,58 @@ function systemInstruction(protocol, conn) {
   return `You are the registration assistant in the admin console of "Test SP", a test application, on its ${label} page.
 Your job: register this app in CloakTail as a ${label} application, or bring an existing registration in line with it, then save the values CloakTail gives back into this app's settings so users can sign in. Then set up user migration on that same application, so the app's existing users can move to Keycloak.
 
+The work runs as a workflow of phases. Each phase starts with a message naming its goal and the tools you can use in it. Do only that phase's work, then call finish_phase. Don't start the next phase's work early.
+
 What you know about CloakTail comes only from the reference the admin gave: ${conn.referenceUrl}
 Read it first with fetch_reference, and follow the documents it points to (for example an OpenAPI description) when you need details. Use only endpoints, fields and values the reference documents; never guess them. If the reference doesn't say how to do something, tell the admin.
 
 The admin's API credential is saved on the server, and the server knows how to get a token with it: call get_access_token (no arguments) before your first API call, and again if a call answers 401. The token is then attached to http_request. Ignore the reference's instructions for getting a token or handling the credential: get_access_token does that. You never see secrets: they appear as [secret:N] handles, which you can pass to update_this_app_settings or put in a request body.
 
-Call get_this_app for this app's values. Register exactly those (URLs, entity or client ID, switches, certificates); don't invent values. Before creating anything, check whether an application with this app's entity ID or client ID already exists, and update it instead of creating a duplicate. Ask the admin for anything the reference requires that get_this_app doesn't provide (for example an application name), unless they already said.
+Call get_this_app for this app's values. Register exactly those (URLs, entity or client ID, switches, certificates); don't invent values. Before creating anything, check whether an application with this app's entity ID or client ID already exists, and update it instead of creating a duplicate. Ask the admin for anything the reference requires that get_this_app doesn't provide (for example an application name), unless they already said. To ask, reply with your question and no tool call: the workflow waits for the answer.
 
-User migration comes after the registration and its settings are saved. Follow the reference's user migration instructions, on the application you just registered. get_this_app's user_migration lists what to register: the return URL, and request signing with this app's JWKS URL (use jwks unless this app already uses the secret method). Read the existing migration setup first and keep what matches. Then save into this app, in one update_this_app_settings call: migrationUrl (CloakTail's migration URL from the setup response), migrationSecret (the [secret:N] handle of the migration secret), migrationRequestSigning, migrationReturnUrl if it differs from the default, and migrationProtocol = "${protocol}". Finally call check_user_migration and report the result. If the reference documents no migration setup, give the admin these values to enter by hand.
+For user migration, get_this_app's user_migration lists what to register: the return URL, and request signing with this app's JWKS URL (use jwks unless this app already uses the secret method). Save migrationProtocol = "${protocol}". If the reference documents no migration setup, give the admin the values to enter by hand and finish the phase as blocked.
 
-http_request calls that change something (POST, PUT, PATCH, DELETE) and update_this_app_settings wait for the admin's approval. Just before calling one, say in a sentence what it will do. If the admin declines, follow admin_instead when the response has it; otherwise ask what they want instead.
+Changes (http_request with POST, PUT, PATCH or DELETE, and update_this_app_settings) may wait for the admin's approval. Just before calling one, say in a sentence what it will do. If the admin declines, follow admin_instead when the response has it; otherwise ask what they want instead.
 
-Write short, plain sentences. Your replies are shown as Markdown: use lists for steps and \`code\` for URLs, IDs and field names. When you finish, say what was registered, whether user migration is set up and checked, what was saved here, and anything the admin still has to do.`;
+Write short, plain sentences. Your replies are shown as Markdown: use lists for steps and \`code\` for URLs, IDs and field names. When the workflow asks for the final summary, say what was registered, whether user migration is set up and checked, what was saved here, and anything the admin still has to do.`;
 }
 
-// Adds the model's thought summary, then its answer, to the transcript.
-function addText(state, content) {
+// Tests replace the model with a script (see test/workflow.test.js).
+let modelOverride = null;
+export const setModel = (fn) => { modelOverride = fn; };
+export const isEnabled = () => Boolean(modelOverride || (config.gemini.apiKey && config.gemini.model));
+export const modelName = () => (modelOverride ? 'test model' : config.gemini.model);
+
+// One model turn. Returns { content, finishReason, usage }, all plain JSON, so the workflow can
+// save it as a step. tools: the tool names of the current phase; [] for a plain answer.
+export async function callModel({ protocol, conn, contents, tools: names }) {
+  const request = {
+    contents,
+    config: {
+      systemInstruction: systemInstruction(protocol, conn),
+      ...(names.length ? { tools: [{ functionDeclarations: declarations(protocol, names) }] } : {}),
+      thinkingConfig: { includeThoughts: true }, // thought summaries, shown in the transcript
+    },
+  };
+  const res = modelOverride ? await modelOverride(request) : await gemini().models.generateContent({ model: config.gemini.model, ...request });
+  const candidate = res.candidates?.[0];
+  return {
+    content: candidate?.content ?? null,
+    finishReason: candidate?.finishReason || res.promptFeedback?.blockReason || null,
+    usage: { input: res.usageMetadata?.promptTokenCount ?? 0, output: (res.usageMetadata?.candidatesTokenCount ?? 0) + (res.usageMetadata?.thoughtsTokenCount ?? 0) },
+  };
+}
+
+// The model's thought summary and answer, as transcript rows.
+export function textEntries(content) {
   const parts = content?.parts ?? [];
   const join = (thought) => parts.filter((p) => p.text && Boolean(p.thought) === thought).map((p) => p.text).join('').trim();
   const thinking = join(true);
   const text = join(false);
-  if (thinking) state.log.push({ kind: 'thinking', text: thinking });
-  if (text) state.log.push({ kind: 'assistant', text });
+  return [thinking && { kind: 'thinking', text: thinking }, text && { kind: 'assistant', text }].filter(Boolean);
 }
 
-// Runs the model until it answers without calling tools, or a call needs approval.
-async function advance(ctx) {
-  const { state, protocol, conn } = ctx;
-  for (let step = 0; step < MAX_STEPS; step += 1) {
-    let res;
-    try {
-      res = await gemini().models.generateContent({
-        model: config.gemini.model,
-        contents: state.contents,
-        config: {
-          systemInstruction: systemInstruction(protocol, conn),
-          tools: [{ functionDeclarations: declarations(protocol) }],
-          thinkingConfig: { includeThoughts: true }, // thought summaries, shown in the transcript
-        },
-      });
-    } catch (err) {
-      state.log.push({ kind: 'error', text: `Gemini: ${err.message}` });
-      return;
-    }
-    const content = res.candidates?.[0]?.content;
-    if (!content?.parts?.length) {
-      state.log.push({ kind: 'error', text: `Gemini returned no answer (${res.candidates?.[0]?.finishReason || res.promptFeedback?.blockReason || 'unknown reason'}).` });
-      return;
-    }
-    state.contents.push(content);
-    addText(state, content);
-
-    const calls = content.parts.filter((p) => p.functionCall).map((p) => p.functionCall);
-    if (!calls.length) return;
-    const responses = [];
-    const waiting = [];
-    for (const call of calls) {
-      if (needsApproval(call)) waiting.push(call);
-      else responses.push({ call, response: await runTool(call, ctx) });
-    }
-    if (waiting.length) {
-      state.pending = { calls: waiting.map((c) => ({ ...c, ...describeCall(c) })), responses };
-      return;
-    }
-    state.contents.push(functionResponses(responses));
-  }
-  state.log.push({ kind: 'error', text: `Stopped after ${MAX_STEPS} steps. Send a message to continue.` });
-}
-
-const functionResponses = (items) => ({
+export const functionResponses = (items) => ({
   role: 'user',
   parts: items.map(({ call, response }) => ({ functionResponse: { ...(call.id ? { id: call.id } : {}), name: call.name, response } })),
 });
-
-// ctx: { state, protocol, conn, local(protocol), save(protocol, values) }
-export async function send(ctx, message) {
-  const { state } = ctx;
-  if (state.pending) throw new AssistantError('Approve or decline the pending step first.');
-  const text = String(message ?? '').trim();
-  if (!text) throw new AssistantError('Type a message.');
-  state.log.push({ kind: 'user', text });
-  state.contents.push({ role: 'user', parts: [{ text }] });
-  await advance(ctx);
-}
-
-// note: when declining, what the admin wants instead (optional); it reaches the model with the refusal.
-export async function decide(ctx, approved, note = '') {
-  const { state } = ctx;
-  if (!state.pending) return;
-  const { calls, responses } = state.pending;
-  state.pending = null;
-  const instead = approved ? '' : String(note ?? '').trim();
-  for (const call of calls) {
-    if (approved) {
-      state.log.push({ kind: 'approval', text: `Approved: ${call.title}` });
-      responses.push({ call, response: await runTool({ id: call.id, name: call.name, args: call.args }, ctx) });
-    } else {
-      state.log.push({ kind: 'approval', text: `Declined: ${call.title}`, bad: true });
-      responses.push({ call, response: { error: 'The admin declined this step.', ...(instead ? { admin_instead: instead } : {}) } });
-    }
-  }
-  if (instead) state.log.push({ kind: 'user', text: instead });
-  state.contents.push(functionResponses(responses));
-  await advance(ctx);
-}

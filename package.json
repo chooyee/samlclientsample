@@ -6,12 +6,14 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test --test-reporter=spec test/migration.test.js",
-    "gen:certs": "node scripts/gen-certs.js"
+    "test": "node --test --test-reporter=spec test/migration.test.js test/workflow.test.js",
+    "gen:certs": "node scripts/gen-certs.js",
+    "test:workflow": "node --test --test-reporter=spec test/workflow.test.js"
   },
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@dbos-inc/dbos-sdk": "^5.2.11",
     "@google/genai": "^2.27.0",
     "@node-saml/passport-saml": "^5.1.1",
     "dotenv": "^18.0.4",

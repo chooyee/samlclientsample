@@ -9,6 +9,7 @@ A small app that plays "a developer's app" outside CloakTail, as a SAML service 
 ```bash
 npm install
 cp .env.example .env    # set SESSION_SECRET
+docker compose up -d postgres   # optional: Postgres for the workflows (see "Workflows")
 npm run dev             # http://localhost:4000
 ```
 
@@ -29,6 +30,7 @@ The app has two sides:
 | **SAML 2.0** (`/admin/saml`) | Step 1: base URL. Step 2: values to register in CloakTail. Step 3: paste the portal's example. Step 4: settings |
 | **OpenID Connect** (`/admin/oidc`) | The same four steps, plus a connection check of the discovery document |
 | **Migration setup** (`/admin/migrate`) | User migration setup, JWKS, check / simulate, legacy users and activity |
+| **Workflows** (`/admin/workflows`) | The durable workflows: each one's phases, its runs, and one run's progress, transcript and saved steps |
 | **Certificates** (`/admin/certs`) | SAML signing and encryption key pairs |
 | **Local profiles** (`/admin/users`) | Profiles created by JIT provisioning |
 
@@ -144,7 +146,9 @@ The agent has no CloakTail knowledge built in: it reads the reference and takes 
 - The agent gets a token by calling `get_access_token`, which takes no arguments: the API credential and the token never reach Gemini. The credential is saved in `data/api-credentials.json` (git-ignored); the token is kept in memory and renewed when it expires. Secrets in API responses reach the model as `[secret:N]` handles; the server puts the real value back when the agent saves it here.
 - Requests that change something (POST, PUT, PATCH, DELETE) and changes to this app's settings wait for **Approve**.
 
-**Disconnect** forgets both conversations; the saved credential is kept until you delete it on the API credentials page.
+The assistant runs as a durable **workflow** (see [Workflows](#workflows)), so it needs `DBOS_SYSTEM_DATABASE_URL` too. It works through six phases in order: read the reference, register the app in CloakTail, save the sign-in settings here, set up user migration in CloakTail, save the migration settings here, check user migration. In each phase the agent gets only that phase's tools, and says when it is done (`finish_phase`); code then checks the phase's result (for example, that the sign-in settings are complete) before the next phase starts. The strip above the transcript shows where it is.
+
+**New conversation** stops the current run and starts over. **Disconnect** forgets the reference URL in this browser session; a run already started keeps going, and its card comes back after a restart.
 
 ## Match the portal settings (SAML)
 
@@ -200,6 +204,41 @@ Seeded users `alice`, `bob` and `carol` (password `Legacy#2024`) are in `data/le
 
 Then enter CloakTail's **migration URL** (its request audience and result issuer, e.g. `http://localhost:3000/migrate`) and the **migration secret** under **Settings → From CloakTail** on the Migration page; no restart. They are not read from `.env` (the secret's `.env` default, `CLOAKTAIL_MIGRATION_SECRET`, still works). The **registration assistant** does all of this after registering the app: it sets up migration on the same CloakTail application with this app's return URL and JWKS URL, saves the migration URL and secret here, and checks a request with `/migrate/check`. The client ID (`iss`) is the SAML entity ID or OIDC client ID, depending on the protocol chosen on the Migration page. **Check request** and **Simulate result** there call `/migrate/check` and `/migrate/simulate`; a simulated result is opened at the return URL to test each status. **Rotate key** replaces the signing key; CloakTail fetches the JWKS again when it sees a new `kid`.
 
+## Workflows
+
+The registration assistant and user migration run as durable workflows on [DBOS](https://docs.dbos.dev), a library that saves every step in Postgres. Nothing else to run: no workflow server, no Postgres extension. Set a database URL and restart:
+
+```bash
+DBOS_SYSTEM_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/testsp_dbos
+```
+
+DBOS creates that database and its tables on first start (the user needs permission to create a database, or create it beforehand and make the user its owner). `docker compose up -d postgres` starts a local Postgres with these credentials. Without the URL the app works as before, except that the assistant is off and user migrations aren't tracked.
+
+What being durable changes:
+
+- **Restarts.** Every model turn and every tool call is a saved step. After a restart (or a crash) DBOS resumes unfinished runs from the last saved step: saved model turns and CloakTail requests are replayed from the database, not sent again. A run waiting for an approval keeps waiting.
+- **Long waits.** A run waiting for an approval or an answer sleeps in Postgres, for up to 7 days, at no cost. Approve from the assistant card or from the run's page.
+- **No duplicates.** A change CloakTail already received is never sent again on replay. Write requests also carry an `Idempotency-Key` header (`<run id>:<call number>`) for servers that honour it.
+- **Secrets.** Step results are stored in Postgres. The values behind `[secret:N]` handles are stored encrypted (AES-256-GCM, key derived from `SESSION_SECRET`); the model's view, the transcript and the run's published state only ever hold the handles. Changing `SESSION_SECRET` leaves old runs' handles unresolved.
+
+**Workflows** (`/admin/workflows`) shows each workflow's definition as its phases (tools, what needs your approval, the check that ends the phase) and its recent runs. A run's page shows its phases, transcript, cost (model calls and tokens), and the steps DBOS saved; **Stop** cancels a run and **Resume** carries a stopped or failed run on from its last saved step.
+
+### The registration workflow is data
+
+The phases are a JSON definition (`src/workflow/definitions.js`), interpreted by `src/workflow/registration.js`. A definition can only use the tools, checks and approval rules in the catalog next to it; `validate()` rejects anything else. A run copies the definition it started with. This is the ground work for the next step: changing the workflow by describing the change ("skip user migration", "ask me before every request"), with an AI editing the JSON, `validate()` checking it, and the admin approving the new version. The Workflows page shows where that will go.
+
+### User migration runs
+
+Each legacy sign-in that sends a user to CloakTail starts a run (also **Simulate result** on the Migration page). The browser path is unchanged: `/migrate/return` still verifies the result and signs the user in, and tells the run what happened. If the user never comes back, the run asks CloakTail's `/migrate/status` after 40 minutes and marks the user migrated if CloakTail did migrate them, instead of waiting for their next sign-in.
+
+### Tests
+
+`npm run test:workflow` drives real runs on Postgres against a fake CloakTail and a scripted model (no Gemini): every phase with approvals, a restart while waiting for approval (nothing is called or sent twice), declining with instructions, secrets never stored in the clear, and both user migration endings. Set `TEST_DBOS_DATABASE_URL` (e.g. `postgresql://postgres:postgres@localhost:5432/testsp_test_dbos`); without it those tests are skipped.
+
+### Versions
+
+A run resumes only on the application version it started on: `DBOS_APP_VERSION` (default `testsp-workflows-1`). If a change alters the order of a workflow's steps, bump it, and let old runs finish or stop them first.
+
 ## Running more than one
 
 To test several applications at once, copy the folder or run with different settings, e.g.:
@@ -212,6 +251,6 @@ Each instance has its own entity ID derived from its base URL, unless one is set
 
 ## Notes
 
-- Sessions are in memory; restarting signs everyone out.
+- Sessions are in memory; restarting signs everyone out. Workflow runs are in Postgres and survive it.
 - Keycloak's signing certificate is read from the IdP metadata URL and cached for an hour. Paste the one from the application page into the settings (or set `IDP_CERT`) to pin it. Saving the settings clears the cache.
 - `package.json` overrides `xml-encryption` to 6.x: the 3.x that `@node-saml/node-saml` 5.1 pulls in cannot decrypt assertions Keycloak encrypts with `http://www.w3.org/2009/xmlenc11#rsa-oaep` (its default key transport). Drop the override once node-saml depends on 6.x.
