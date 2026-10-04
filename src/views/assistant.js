@@ -164,7 +164,7 @@ function chatWindow(a) {
 }
 
 export function assistantCard(a, draft) {
-  const description = `Does steps 2 to 4 for you, and sets up <a href="/admin/migrate">user migration</a>. An AI agent (Google Gemini, <code>${esc(a.model)}</code>) registers this app in CloakTail as a ${LABEL[a.protocol]} application and fills the settings below. You approve every change, and progress is saved, so a restart doesn't lose it. Prefer to do it yourself? Skip this and follow the steps.`;
+  const description = `Does steps 2 to 4 for you, then sets up <a href="/admin/migrate">user migration</a>: an AI agent (Google Gemini, <code>${esc(a.model)}</code>) registers this app in CloakTail as a ${LABEL[a.protocol]} application, using only the CloakTail API reference you give it, and fills this app's settings. You approve every change. <a href="/admin/architecture">How it works</a>. Or skip it and follow the steps by hand.`;
   let body;
   if (!a.enabled) {
     body = alert('info', 'The assistant is off', ['Set <code>GEMINI_API_KEY</code> and <code>GEMINI_MODEL</code> in <code>.env</code> and restart to turn it on.']);
