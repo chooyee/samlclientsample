@@ -17,6 +17,7 @@ import * as credentials from './apiCredentials.js';
 import { adminHomePage, samlPage, oidcPage, certsPage, usersPage } from './views/pages.js';
 import { migrationPage } from './views/migration.js';
 import { apiCredentialsPage } from './views/apiCredentials.js';
+import { architecturePage } from './views/architecture.js';
 import { homePage, legacyPage, redirectToCloakTail, errorPage } from './views/customer.js';
 
 // ---------- key pairs ----------
@@ -236,6 +237,8 @@ app.get('/admin/certs', (req, res) => render(req, res, certsPage, { keys, keyErr
 app.get('/admin/users', (req, res) => render(req, res, usersPage, { profiles: listProfiles() }));
 
 app.get('/admin/api', (req, res) => render(req, res, apiCredentialsPage, { credentials: credentials.credentialsView() }));
+
+app.get('/admin/architecture', (req, res) => render(req, res, architecturePage, { enabled: assistant.isEnabled(), model: config.gemini.model }));
 
 // The admin pages used to live at the top level.
 for (const page of ['saml', 'oidc', 'certs', 'users', 'migrate']) {

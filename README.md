@@ -28,6 +28,8 @@ The app has two sides:
 | **Overview** (`/admin`) | What the app is, setup status for each part, and what to test |
 | **SAML 2.0** (`/admin/saml`) | Step 1: base URL. Step 2: values to register in CloakTail. Step 3: paste the portal's example. Step 4: settings |
 | **OpenID Connect** (`/admin/oidc`) | The same four steps, plus a connection check of the discovery document |
+| **API credentials** (`/admin/api`) | The CloakTail API credential the AI assistant uses, and a **Get access token** button to check it |
+| **How it works** (`/admin/architecture`) | The AI assistant's design in two views: **Overview** (what it does, why it is safe, future uses) and **Engineering** (components, the agent loop, tools and guard rails, saving into this app, known limits) |
 | **Migration setup** (`/admin/migrate`) | User migration setup, JWKS, check / simulate, legacy users and activity |
 | **Certificates** (`/admin/certs`) | SAML signing and encryption key pairs |
 | **Local profiles** (`/admin/users`) | Profiles created by JIT provisioning |
@@ -131,18 +133,31 @@ Then copy the application page's values into **SAML 2.0 → Settings** (above), 
 
 ### Or let the AI assistant do it
 
-The SAML 2.0 and OpenID Connect pages have a **Register with the AI assistant** card: a Google Gemini agent that registers this app through CloakTail's developer API and fills that page's settings from the result.
+The SAML 2.0 and OpenID Connect pages have a **Shortcut: register with the AI assistant** card, just below step 1: a Google Gemini agent that registers this app through CloakTail's developer API, fills that page's settings from the result, then sets up and checks user migration.
 
 1. Set `GEMINI_API_KEY` and `GEMINI_MODEL` (e.g. `gemini-flash-latest`) in `.env` and restart.
 2. On **API credentials** (`/admin/api`), enter the **CloakTail URL** and an **API client ID and secret** from CloakTail's API credentials page, then **Save and get access token** to check them. This app gets tokens itself (`POST <CloakTail URL>/api/v1/oauth/token`, client credentials, HTTP Basic).
 3. On the card, enter the **CloakTail reference URL** (the API guide or OpenAPI spec the agent should work from; it defaults to `<CloakTail URL>/api/v1/agent.md`).
-4. Click **Register this app**, or ask for something else (e.g. "check the existing registration").
+4. Click **Connect**, then **Register this app** (shown while the conversation is empty), or type a request and **Send** (e.g. "check the existing registration").
+
+The agent works through these tools; the transcript shows each call:
+
+| Tool | Transcript | What it does | Approval |
+|---|---|---|---|
+| `fetch_reference` | `Fetch` | Reads the reference, or a document it links to (e.g. the OpenAPI spec) | No |
+| `get_access_token` | `GetToken` | Asks this app for a token with the saved credential. No arguments; returns only the expiry and scopes | No |
+| `http_request` | `Request` | Calls the CloakTail API with the token attached | `GET` no; `POST`/`PUT`/`PATCH`/`DELETE` yes |
+| `get_this_app` | `ReadApp` | This app's values to register (URLs, entity or client ID, certificates) and current settings | No |
+| `update_this_app_settings` | `SaveSettings` | Saves what CloakTail returned into this app's SAML, OIDC or migration settings | Yes |
+| `check_user_migration` | `CheckMigration` | Sends a migration request for a legacy test user to CloakTail's `/migrate/check` | No |
 
 The agent has no CloakTail knowledge built in: it reads the reference and takes the paths and fields from it, so it follows whatever the reference documents. The code only fixes the guard rails:
 
 - The reference must be on the saved CloakTail server, and the agent can call only that server, so the token can't be sent elsewhere.
 - The agent gets a token by calling `get_access_token`, which takes no arguments: the API credential and the token never reach Gemini. The credential is saved in `data/api-credentials.json` (git-ignored); the token is kept in memory and renewed when it expires. Secrets in API responses reach the model as `[secret:N]` handles; the server puts the real value back when the agent saves it here.
 - Requests that change something (POST, PUT, PATCH, DELETE) and changes to this app's settings wait for **Approve**.
+
+**How it works** (`/admin/architecture`) explains the design, with an Overview tab for stakeholders and an Engineering tab for developers.
 
 **Disconnect** forgets both conversations; the saved credential is kept until you delete it on the API credentials page.
 
@@ -208,10 +223,10 @@ To test several applications at once, copy the folder or run with different sett
 PORT=4001 BASE_URL=http://localhost:4001 npm start
 ```
 
-Each instance has its own entity ID derived from its base URL, unless one is set. Give each its own `SETTINGS_FILE` and key files, or they share them.
+Each instance has its own entity ID derived from its base URL, unless one is set. Give each its own `SETTINGS_FILE`, `API_CREDENTIALS_FILE` and key files, or they share them.
 
 ## Notes
 
-- Sessions are in memory; restarting signs everyone out.
+- Sessions are in memory; restarting signs everyone out and ends the assistant's conversations. The saved API credential is kept; the access token is fetched again when needed.
 - Keycloak's signing certificate is read from the IdP metadata URL and cached for an hour. Paste the one from the application page into the settings (or set `IDP_CERT`) to pin it. Saving the settings clears the cache.
 - `package.json` overrides `xml-encryption` to 6.x: the 3.x that `@node-saml/node-saml` 5.1 pulls in cannot decrypt assertions Keycloak encrypts with `http://www.w3.org/2009/xmlenc11#rsa-oaep` (its default key transport). Drop the override once node-saml depends on 6.x.
