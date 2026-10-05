@@ -163,7 +163,7 @@ The agent has no CloakTail knowledge built in: it reads the reference and takes 
 
 The assistant runs as a durable **workflow** (see [Workflows](#workflows)), so it needs `DBOS_SYSTEM_DATABASE_URL` too. It works through six phases in order: read the reference, register the app in CloakTail, save the sign-in settings here, set up user migration in CloakTail, save the migration settings here, check user migration. In each phase the agent gets only that phase's tools, and says when it is done (`finish_phase`); code then checks the phase's result (for example, that the sign-in settings are complete) before the next phase starts. The strip above the transcript shows where it is.
 
-**New conversation** stops the current run and starts over. **Disconnect** forgets the reference URL in this browser session; a run already started keeps going, and its card comes back after a restart.
+**New conversation** stops the current run and starts over. **Disconnect** forgets the reference URL in this browser session; a run already started keeps going, and its card comes back after a restart. The saved API credential is kept until you delete it on the API credentials page.
 
 ## Match the portal settings (SAML)
 
@@ -266,7 +266,6 @@ Each instance has its own entity ID derived from its base URL, unless one is set
 
 ## Notes
 
-- Sessions are in memory; restarting signs everyone out. Workflow runs are in Postgres and survive it.
-- Sessions are in memory; restarting signs everyone out and ends the assistant's conversations. The saved API credential is kept; the access token is fetched again when needed.
+- Sessions are in memory; restarting signs everyone out. Workflow runs, including the assistant's conversations, are in Postgres and survive it. The saved API credential is kept; the access token is fetched again when needed.
 - Keycloak's signing certificate is read from the IdP metadata URL and cached for an hour. Paste the one from the application page into the settings (or set `IDP_CERT`) to pin it. Saving the settings clears the cache.
 - `package.json` overrides `xml-encryption` to 6.x: the 3.x that `@node-saml/node-saml` 5.1 pulls in cannot decrypt assertions Keycloak encrypts with `http://www.w3.org/2009/xmlenc11#rsa-oaep` (its default key transport). Drop the override once node-saml depends on 6.x.
