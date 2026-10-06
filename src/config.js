@@ -10,6 +10,14 @@ const flag = (name, fallback) => (process.env[name] ?? String(fallback)).toLower
 
 const port = Number(process.env.PORT || 4000);
 
+const list = (value) => String(value ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+
+function positiveInt(name, fallback) {
+  const value = Number(process.env[name] || fallback);
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive whole number (see .env.example)`);
+  return value;
+}
+
 // The URLs this app registers in CloakTail, all under the base URL: the address the browser uses.
 // The base URL is a setting (see settings.js); BASE_URL is only its default.
 export function appUrls(base) {
@@ -67,6 +75,24 @@ export const config = {
     // Runs resume only on the same version: bump it when a workflow's steps change order.
     version: process.env.DBOS_APP_VERSION || 'testsp-workflows-1',
   },
+  // Customer documents (see files.js): uploads through the app (proxied) or direct to S3 (presigned).
+  // Off unless a bucket is set. The AWS SDK finds the credentials itself: AWS_ACCESS_KEY_ID and
+  // AWS_SECRET_ACCESS_KEY (from .env), AWS_PROFILE, or an instance or task role.
+  s3: {
+    bucket: process.env.AWS_S3_BUCKET || '',
+    region: process.env.AWS_REGION || '',
+    keyPrefix: process.env.S3_KEY_PREFIX || 'testsp',
+    urlTtlSeconds: positiveInt('S3_URL_TTL_SECONDS', 15 * 60),
+  },
+  uploads: {
+    maxBytes: positiveInt('UPLOAD_MAX_BYTES', 1024 ** 3),
+    // Empty: any type.
+    allowedTypes: list(process.env.UPLOAD_ALLOWED_TYPES),
+    // The longest any request may take, so the longest upload. Applies to the whole server.
+    timeoutSeconds: positiveInt('UPLOAD_TIMEOUT_SECONDS', 60 * 60),
+  },
+  filesFile: process.env.FILES_FILE || 'data/files.json',
+
   migrationKeyFile: process.env.MIGRATION_KEY_FILE || 'certs/migration-key.pem',
   // Results from POST /migrate/simulate carry simulated: true. Accepted only while testing.
   acceptSimulated: flag('MIGRATION_ACCEPT_SIMULATED', process.env.NODE_ENV !== 'production'),

@@ -14,6 +14,7 @@ import * as migration from './migration.js';
 import * as legacy from './legacyUsers.js';
 import * as assistant from './assistant.js';
 import * as credentials from './apiCredentials.js';
+import * as files from './files.js';
 import * as engine from './workflow/engine.js';
 import * as registration from './workflow/registration.js';
 import * as userMigration from './workflow/userMigration.js';
@@ -24,6 +25,7 @@ import { apiCredentialsPage } from './views/apiCredentials.js';
 import { workflowsPage, runPage } from './views/workflow.js';
 import { architecturePage } from './views/architecture.js';
 import { homePage, legacyPage, redirectToCloakTail, errorPage } from './views/customer.js';
+import { documentsPage } from './views/documents.js';
 
 // ---------- key pairs ----------
 
@@ -1194,6 +1196,99 @@ app.post('/migrate/users/:id/reset', sameOrigin, (req, res) => {
   res.redirect('/admin/migrate#users');
 });
 
+// ---------- customer documents (see files.js) ----------
+
+// The documents page, for any signed-in customer.
+app.get('/documents', (req, res) => {
+  if (!req.user) return res.redirect('/');
+  render(req, res, documentsPage, { files: files.listFiles(req.user), uploads: files.settingsView() });
+});
+
+// Answers a files.js error as { error } with its status, or passes a bug on.
+function documentsFailed(res, next, err) {
+  const status = files.statusFor(err);
+  if (!status) return next(err);
+  if (status >= 500) console.error(`Documents: ${err.message}`);
+  res.status(status).json({ error: status === 502 ? 'File storage is unavailable. Try again later.' : err.message });
+}
+
+// Proxied: one file per request, as the raw body (application/octet-stream), streamed on to S3 as
+// it arrives. Its name and type come in X-File-Name (URI-encoded) and X-File-Type. Only a
+// same-origin script can send those headers, so a cross-site form can't post here.
+app.post('/documents/proxied', sameOrigin, async (req, res, next) => {
+  // Refused before the body is read: close the connection rather than read a large file for nothing.
+  const refuse = (status, error) => res.status(status).set('Connection', 'close').json({ error });
+  if (!req.user) return refuse(401, 'Your session has ended. Sign in again.');
+  if (!req.is('application/octet-stream') || !req.get('x-file-name')) return refuse(415, 'Send the file as application/octet-stream, with X-File-Name.');
+  const size = Number(req.get('content-length'));
+  if (!Number.isSafeInteger(size)) return refuse(411, 'The upload needs a Content-Length.');
+  let filename;
+  try {
+    filename = decodeURIComponent(req.get('x-file-name'));
+  } catch {
+    return refuse(400, 'X-File-Name must be URI-encoded.');
+  }
+
+  // The browser went away (closed the tab, lost the network): stop, and leave nothing in S3.
+  const cancel = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) cancel.abort(); });
+  try {
+    const file = await files.uploadProxied(req.user, { filename, contentType: req.get('x-file-type'), size, body: req, signal: cancel.signal });
+    res.status(201).set('Cache-Control', 'no-store').json(file);
+  } catch (err) {
+    if (cancel.signal.aborted) return; // nobody to answer
+    res.set('Connection', 'close'); // the body may be unread
+    documentsFailed(res, next, err);
+  }
+});
+
+// Presigned: JSON calls that sign URLs; the browser PUTs the bytes to S3 itself. JSON only, so a
+// cross-site form can't post here.
+const presignedApi = express.Router();
+presignedApi.use(sameOrigin, (req, res, next) => {
+  if (!req.user) return res.status(401).json({ error: 'Your session has ended. Sign in again.' });
+  if (!req.is('application/json')) return res.status(415).json({ error: 'Send JSON.' });
+  next();
+}, express.json({ limit: '64kb' }));
+
+const presignedCall = (handler) => async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store').json(await handler(req) ?? { ok: true });
+  } catch (err) {
+    documentsFailed(res, next, err);
+  }
+};
+
+presignedApi.post('/', presignedCall((req) => files.startPresigned(req.user, req.body)));
+presignedApi.post('/:id/parts', presignedCall(async (req) => ({ parts: await files.signParts(req.user, req.params.id, req.body.partNumbers) })));
+presignedApi.post('/:id/complete', presignedCall((req) => files.completePresigned(req.user, req.params.id, req.body.parts)));
+presignedApi.post('/:id/abort', presignedCall((req) => files.abortPresigned(req.user, req.params.id)));
+app.use('/documents/presigned', presignedApi);
+
+// Redirects to a presigned S3 URL that lasts a minute.
+app.get('/documents/:id/download', async (req, res, next) => {
+  if (!req.user) return res.redirect('/');
+  try {
+    res.set('Cache-Control', 'no-store').redirect(await files.downloadUrl(req.user, req.params.id));
+  } catch (err) {
+    if (!files.statusFor(err)) return next(err);
+    setFlash(req, 'bad', 'The file could not be downloaded.', [err.message]);
+    res.redirect('/documents');
+  }
+});
+
+app.post('/documents/:id/delete', sameOrigin, async (req, res, next) => {
+  if (!req.user) return res.redirect('/');
+  try {
+    const file = await files.deleteFile(req.user, req.params.id);
+    setFlash(req, 'ok', `Deleted ${file.name}.`);
+  } catch (err) {
+    if (!files.statusFor(err)) return next(err);
+    setFlash(req, 'bad', 'The file was not deleted.', [err.message]);
+  }
+  res.redirect('/documents');
+});
+
 // ---------- local profiles ----------
 
 // Forgets every local profile, so the next sign-in counts as a first one again.
@@ -1250,7 +1345,7 @@ app.use((err, req, res, next) => {
 // DBOS resumes the runs a previous process left unfinished. The hosts above are set by now.
 await engine.launch({ retry: true });
 
-app.listen(config.port, () => {
+const server = app.listen(config.port, () => {
   console.log(`Test SP on ${active.baseUrl}`);
   console.log(`  Workflows:          ${engine.isReady() ? `on (${engine.engineStatus().database})` : `off: ${engine.engineStatus().reason}`}`);
   console.log(`  SAML  entity ID:    ${active.sp.entityId}${isConfigured('saml') ? '' : ' (IdP not configured)'}`);
@@ -1258,3 +1353,5 @@ app.listen(config.port, () => {
   console.log(`  OIDC  client ID:    ${active.oidc.clientId || '(not configured)'}`);
   console.log(`        redirect URI: ${active.oidc.redirectUri}`);
 });
+// A document upload streams through the request for its whole length (Node's default is 5 minutes).
+server.requestTimeout = config.uploads.timeoutSeconds * 1000;

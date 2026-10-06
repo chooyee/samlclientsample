@@ -6,13 +6,18 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test --test-reporter=spec test/migration.test.js test/workflow.test.js",
+    "test": "node --test --test-reporter=spec test/migration.test.js test/workflow.test.js test/files.test.js",
     "gen:certs": "node scripts/gen-certs.js",
-    "test:workflow": "node --test --test-reporter=spec test/workflow.test.js"
+    "test:workflow": "node --test --test-reporter=spec test/workflow.test.js",
+    "test:files": "node --test --test-reporter=spec test/files.test.js",
+    "s3:setup": "node scripts/s3-setup.js"
   },
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1146.0",
+    "@aws-sdk/lib-storage": "^3.1146.0",
+    "@aws-sdk/s3-request-presigner": "^3.1146.0",
     "@dbos-inc/dbos-sdk": "^5.2.11",
     "@google/genai": "^2.27.0",
     "@node-saml/passport-saml": "^5.1.1",

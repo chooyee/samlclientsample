@@ -115,7 +115,8 @@ const DEMO_ACCOUNTS = [
 ];
 
 const accounts = `<section aria-labelledby="accounts-title">
-  <div class="section-title"><h2 class="display" id="accounts-title">Your accounts</h2>${badge('Demo data', 'warn')}</div>
+  <div class="section-title"><div class="row"><h2 class="display" id="accounts-title">Your accounts</h2>${badge('Demo data', 'warn')}</div>
+    <a class="btn" href="/documents">${icon('file')}Documents</a></div>
   <div class="accounts">${DEMO_ACCOUNTS.map((a) => `<div class="account${a.feature ? ' feature' : ''}">
     <span class="label">${icon(a.icon)}${a.label}</span>
     <div class="amount">${a.amount}</div><span class="num">${a.num}</span></div>`).join('')}</div>

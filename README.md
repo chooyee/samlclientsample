@@ -21,6 +21,7 @@ The app has two sides:
 |---|---|
 | **Sign in** (`/`) | What the app is, how sign-in works, and the sign-in card: choose OpenID Connect or SAML 2.0 (`/?via=oidc` / `/?via=saml`), *Sign in securely*, *Open an account*, and tester options (force login form, IdP-initiated). Once signed in: the accounts page (demo data), sign-out options, the local profile, and a collapsible **Developer view** with the attributes / claims, tokens and XML |
 | **Legacy sign-in** (`/legacy`) | The app before Keycloak: old passwords, migrating each user through CloakTail |
+| **Documents** (`/documents`) | Signed-in customers upload files to S3, through the app or directly with presigned URLs, then download or delete them (see [Customer documents](#customer-documents-s3)) |
 
 **Admin console** (`/admin`), with the setup sidebar. Customers never need it.
 
@@ -253,6 +254,58 @@ Each legacy sign-in that sends a user to CloakTail starts a run (also **Simulate
 ### Versions
 
 A run resumes only on the application version it started on: `DBOS_APP_VERSION` (default `testsp-workflows-1`). If a change alters the order of a workflow's steps, bump it, and let old runs finish or stop them first.
+
+## Customer documents (S3)
+
+Any signed-in customer (SAML, OpenID Connect or legacy) can upload files on **Documents** (`/documents`, linked from the accounts page), then download or delete them. Each customer sees only their own files.
+
+The page has **two upload buttons, one per method**, so you can compare them. Each upload shows its time and throughput, and each file shows the method it came by:
+
+| | **Upload through the app** (proxied) | **Upload direct to S3** (presigned) |
+|---|---|---|
+| Path of the bytes | browser → app → S3 | browser → S3 |
+| Requests | `POST /documents/proxied`: the raw file (`application/octet-stream`), name and type in `X-File-Name` / `X-File-Type` | `POST /documents/presigned` → a URL; multipart: `/:id/parts`; then `/:id/complete` (or `/:id/abort`) |
+| How | The app streams the request body to S3 as it arrives, in 5 MB parts, 4 in flight: about 20 MB of memory per upload, nothing on disk | The app signs a PUT URL with the size and type bound in. Over 32 MB: a multipart upload whose part URLs are signed on demand; the browser sends 4 parts at once and retries a failed part |
+| The app sees the bytes | Yes (it could scan or transform them) | No |
+| App bandwidth and connections | Every byte in and out; one connection per upload for its whole length (3 at a time per customer) | Only small JSON calls |
+| Bucket CORS | Not needed | Needed (`npm run s3:setup`) |
+| Limits checked | Before the body is read (refused with `Connection: close`), as it streams, and on the stored object | Before signing, by S3 (signed size), and on the stored object |
+
+Either way, a file is listed only once S3 holds all of it at the declared size, and a cancelled or failed upload leaves nothing behind. **Download** redirects to a GET URL that lasts a minute, as an attachment under the original name.
+
+The list of files (owner, name, size, method, object key) is kept in `data/files.json` (`FILES_FILE`). Object keys hold no personal data: `<S3_KEY_PREFIX>/documents/<owner hash>/<file id>/<safe name>`.
+
+### Set up
+
+```bash
+# .env: AWS_S3_BUCKET, AWS_REGION, and AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or a role)
+npm run s3:setup                             # CORS for BASE_URL (presigned), and a rule aborting abandoned uploads after a day
+npm run s3:setup -- https://other.origin     # other origins
+```
+
+The CORS rule allows `PUT`, `GET` and `HEAD` from the app's origin with any header, and exposes `ETag` (multipart uploads read it). The bucket's other rules are kept. Proxied uploads hold the request open for the whole upload, so the server's request timeout is `UPLOAD_TIMEOUT_SECONDS` (default an hour, for every request) instead of Node's 5 minutes.
+
+### The S3 factory (`src/factory/s3`)
+
+All the S3 code lives here, generic enough for any other feature. `createS3Storage({ bucket, region })` returns one object per bucket:
+
+| Group | Operations |
+|---|---|
+| Presigned URLs | `presignPut`, `presignGet`, `presignUploadPart` |
+| Download | `getObject` (a stream, with optional byte range), `getObjectBytes`, `getObjectText`, `downloadToFile` |
+| Upload from the server | `upload` (Buffer, string or stream of any size, even unknown; in parts when large; progress and cancel) |
+| Objects | `head`, `exists`, `list` (pages), `listAll` (async iterator), `copy`, `move`, `remove`, `removeMany`, `removePrefix` |
+| Multipart | `createMultipartUpload`, `completeMultipartUpload`, `abortMultipartUpload`, `listMultipartUploads` |
+| Bucket | `getBucket`, `getCors`, `setCors`, `allowBrowserUploads`, `abortIncompleteUploadsAfter`; `listBuckets(client)` for the account |
+
+Two ways to take uploads from clients sit on top of it, both checked against a policy from `defineUploadPolicy({ maxBytes, allowedTypes })`:
+
+- `createStreamUploader({ storage, policy })`: `receive({ key, filename, contentType, size, body, signal })` streams any Readable (an HTTP request) to S3 and stops it if it runs past the declared size.
+- `createPresignedUploader({ storage, policy })`: `begin`, `signParts`, `finish`, `abort`. It is stateless: the caller keeps the session server-side.
+
+`objectKey` and `safeFilename` build keys. Every S3 failure is a `StorageError`, and every refused upload an `UploadRejectedError` with a `code`. `src/files.js` uses both uploaders.
+
+`npm run test:files` runs the factory and the documents feature with the real AWS SDK against a fake S3 endpoint.
 
 ## Running more than one
 
