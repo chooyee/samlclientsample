@@ -51,7 +51,9 @@ export async function discoveryStatus(oidc) {
 }
 
 // Starts a sign-in. Returns { url, pending }; keep pending in the session for the callback.
-export async function startSignIn(oidc, { prompt, loginHint } = {}) {
+// Re-authentication before a sensitive action: maxAge 0 with prompt=login for a full sign-in, or
+// acr to ask for a level of authentication (Keycloak step-up: only what the level adds, e.g. OTP).
+export async function startSignIn(oidc, { prompt, loginHint, maxAge, acr } = {}) {
   const config = await getOidcConfig(oidc);
   const pending = { state: client.randomState(), nonce: client.randomNonce(), startedAt: Date.now() };
   const params = {
@@ -67,6 +69,9 @@ export async function startSignIn(oidc, { prompt, loginHint } = {}) {
   }
   if (prompt) params.prompt = prompt;
   if (loginHint) params.login_hint = loginHint;
+  if (maxAge != null) params.max_age = String(maxAge);
+  // Essential, so Keycloak refuses rather than answering with a lower level.
+  if (acr) params.claims = JSON.stringify({ id_token: { acr: { essential: true, values: [acr] } } });
   return { url: client.buildAuthorizationUrl(config, params).href, pending };
 }
 

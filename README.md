@@ -197,6 +197,55 @@ Requiring a signature the portal doesn't turn on is a good negative test: sign-i
 | Signed requests | Turn on *Sign requests* here and *Require signed requests* in the portal |
 | Encrypted assertions | Turn on *Decrypt assertions* here and *Encrypt assertions* in the portal |
 | Key rotation | Regenerate a key pair; sign-in fails until the new certificate is in the portal |
+| Re-authentication (step-up) | Signed in, click **Go to Plover Trip** under *Partner offers*: Keycloak asks for the password and OTP again, or only the OTP with `STEP_UP_ACR` (see below) |
+
+## Partner site after re-authentication
+
+The accounts page has a **Partner offers** card linking to [Plover Trip](https://www.plovertrip.com/). The link goes to `/plover` first, which makes the customer sign in again where they signed in; only a successful re-authentication by the same customer redirects to Plover Trip, and it asks every time. The local session is kept either way.
+
+| Signed in with | Re-authentication | Checked on return |
+|---|---|---|
+| OpenID Connect | Authorization request with `prompt=login` and `max_age=0` (and `login_hint`), back through `/oidc/callback` | Same issuer and `sub`; `auth_time` in the new ID token is after the request (30 s clock skew allowed) |
+| SAML 2.0 | AuthnRequest with `ForceAuthn` and `RelayState=plover.<nonce>`. The ACS hands the result to `/plover/return` with a one-time ticket, because a cross-site POST to the ACS may arrive without the session cookie | The nonce matches this session; same issuer and Name ID (the email for a transient Name ID); `InResponseTo` is set; `AuthnInstant` isn't older than the request |
+| Legacy password | The app asks for the old password again (5 wrong tries lock it for 5 minutes) | The password is the signed-in user's |
+
+**The one-time code comes from Keycloak.** `prompt=login` / `ForceAuthn` make Keycloak show its login form even with an SSO session; it asks for the OTP after the password when the user has one set up in the realm (*Authentication → Required actions → Configure OTP*, or an OTP-required browser flow). Without OTP set up, the customer re-enters only the password. If the user signs in as someone else at Keycloak, the app refuses, and Keycloak's session is now the other user's.
+
+### Straight to the OTP (Keycloak step-up)
+
+With Keycloak's [step-up authentication](https://www.keycloak.org/docs/latest/server_admin/index.html#_step-up-flow), the app asks for a **level of authentication** instead of a new sign-in. Keycloak keeps the password from the SSO session and shows only the OTP form.
+
+| | OpenID Connect | SAML 2.0 |
+|---|---|---|
+| Setting | `STEP_UP_ACR`: the ACR value, e.g. `mfa` | `STEP_UP_SAML_ACR`: the mapping's SAML URI, e.g. `urn:oasis:names:tc:SAML:2.0:ac:classes:TimeSyncToken` |
+| Request | Essential `acr` in the `claims` parameter (Keycloak returns an error rather than a lower level) | `RequestedAuthnContext`, `Comparison="exact"` |
+| Checked on return | ID token `acr` equals the setting | Assertion's `AuthnContextClassRef` equals the setting |
+| Keycloak version | Any current | 26.6 (preview: `--features=step-up-authentication-saml`); supported and on by default from 26.7 |
+
+Each setting replaces the full sign-in again for its protocol only; leave one empty to keep the full sign-in for it. The issuer, subject and `RelayState` checks stay. Restart after changing them.
+
+Set up the realm in the Keycloak admin console:
+
+1. **Authentication** → duplicate the *browser* flow (e.g. *browser step-up*) and give it this shape, levels ordered from the lowest:
+
+   | Execution | Requirement |
+   |---|---|
+   | Cookie | Alternative |
+   | Auth Flow (sub-flow) | Alternative |
+   | &nbsp;&nbsp;1st Condition Flow (sub-flow) | Conditional |
+   | &nbsp;&nbsp;&nbsp;&nbsp;Condition - Level of Authentication: alias `password`, level `1`, max age `36000` | Required |
+   | &nbsp;&nbsp;&nbsp;&nbsp;Username Password Form | Required |
+   | &nbsp;&nbsp;2nd Condition Flow (sub-flow) | Conditional |
+   | &nbsp;&nbsp;&nbsp;&nbsp;Condition - Level of Authentication: alias `mfa`, level `2`, max age **`0`** | Required |
+   | &nbsp;&nbsp;&nbsp;&nbsp;OTP Form | Required |
+
+   Max age `0` makes level 2 valid for that one authentication only, so the OTP is asked every time. Level 1's `36000` (10 hours) lets the SSO session stand in for the password.
+2. **Realm settings → ACR to LoA Mapping**: add `mfa` → `2`. For SAML, fill the row's SAML URI too (shown once SAML step-up is enabled). The mapping can also be set per client, under the client's *Advanced* tab; the realm is the recommended place.
+3. Use the flow for **this client only**: *Clients → (this app's client) → Advanced → Authentication flow overrides → Browser flow*. Binding it as the realm's browser flow changes sign-in for every app in the realm.
+4. Check the client has the **`acr`** client scope (default; its *acr loa level* mapper puts `acr` in the ID token). Without it the app sees no `acr` and refuses.
+5. Set `STEP_UP_ACR=mfa` (and `STEP_UP_SAML_ACR=<the URI>` for SAML) and restart.
+
+Sign-in itself then stops at level 1 (password only); the OTP is asked when going to Plover Trip. A user with no OTP set up is asked to configure one at that point. The app can't see the level's max age: that the OTP is asked *every* time rests on the `0` in step 1. The realm's discovery document lists the mapped ACR values under `acr_values_supported` once step 2 is done.
 
 ## User migration (legacy users → Keycloak)
 

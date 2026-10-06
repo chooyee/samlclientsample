@@ -55,6 +55,15 @@ export const config = {
     referenceUrl: process.env.CLOAKTAIL_REFERENCE_URL || '',
   },
 
+  // Re-authentication before going to Plover Trip. With an ACR value mapped to a Keycloak level of
+  // authentication (step-up, e.g. "mfa" for "password + OTP"), Keycloak keeps the password from the
+  // SSO session and asks only for what that level adds, the OTP. SAML asks with the mapping's URI.
+  // Empty: a full sign-in again (password, then OTP), for that protocol.
+  stepUp: {
+    acr: process.env.STEP_UP_ACR || '',
+    samlAcr: process.env.STEP_UP_SAML_ACR || '',
+  },
+
   // The registration assistant on the SAML and OIDC pages. Off unless both are set.
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',

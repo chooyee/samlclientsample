@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import express from 'express';
 import session from 'express-session';
 import passport from 'passport';
@@ -23,7 +24,7 @@ import { migrationPage } from './views/migration.js';
 import { apiCredentialsPage } from './views/apiCredentials.js';
 import { workflowsPage, runPage } from './views/workflow.js';
 import { architecturePage } from './views/architecture.js';
-import { homePage, legacyPage, redirectToCloakTail, errorPage } from './views/customer.js';
+import { homePage, legacyPage, redirectToCloakTail, errorPage, ploverReauthPage, PLOVER_URL } from './views/customer.js';
 
 // ---------- key pairs ----------
 
@@ -162,6 +163,12 @@ function buildStrategies() {
   passport.use('saml', strategy);
   // Same settings with ForceAuthn, so "sign in as someone else" always shows Keycloak's form.
   passport.use('saml-force', new SamlStrategy({ ...samlOptions, forceAuthn: true }, signOnVerify, logoutVerify));
+  // Re-authentication before Plover Trip: a level of authentication (Keycloak step-up), or a full sign-in.
+  passport.use('saml-stepup', config.stepUp.samlAcr
+    ? new SamlStrategy({
+      ...samlOptions, disableRequestedAuthnContext: false, authnContext: [config.stepUp.samlAcr], racComparison: 'exact',
+    }, signOnVerify, logoutVerify)
+    : new SamlStrategy({ ...samlOptions, forceAuthn: true }, signOnVerify, logoutVerify));
   active = { baseUrl, sp, idp, oidc: oidcSettings, migration: migrationSettings, signing, encryption };
 }
 
@@ -300,6 +307,8 @@ app.get('/signup', requireConfigured('saml'), (req, res, next) => {
 // Assertion Consumer Service.
 app.post('/saml/acs', (req, res, next) => {
   passport.authenticate('saml', (err, user) => {
+    const relayState = String(req.body?.RelayState ?? '');
+    if (relayState.startsWith(STEP_UP_RELAY)) return samlStepUpReturn(res, err, user, relayState.slice(STEP_UP_RELAY.length));
     if (err || !user) {
       const message = err?.message || 'No user returned';
       console.error('SAML login failed:', message);
@@ -323,13 +332,17 @@ app.post('/saml/acs', (req, res, next) => {
 // OIDC sign-in. Pending sign-ins are kept per state, so two tabs can sign in at once.
 const PENDING_MAX = 5;
 
+function keepPending(req, pending) {
+  const kept = Object.entries(req.session.oidcPending ?? {})
+    .filter(([, p]) => Date.now() - p.startedAt < REQUEST_TTL_MS)
+    .slice(-(PENDING_MAX - 1));
+  req.session.oidcPending = Object.fromEntries([...kept, [pending.state, pending]]);
+}
+
 async function oidcSignIn(req, res, prompt, loginHint) {
   try {
     const { url, pending } = await oidc.startSignIn(active.oidc, { prompt, loginHint });
-    const kept = Object.entries(req.session.oidcPending ?? {})
-      .filter(([, p]) => Date.now() - p.startedAt < REQUEST_TTL_MS)
-      .slice(-(PENDING_MAX - 1));
-    req.session.oidcPending = Object.fromEntries([...kept, [pending.state, pending]]);
+    keepPending(req, pending);
     res.redirect(url);
   } catch (err) {
     setFlash(req, 'bad', 'Could not start the OpenID Connect sign-in.', [oidc.describeError(err)]);
@@ -356,6 +369,7 @@ app.get('/oidc/callback', async (req, res, next) => {
       : 'No sign-in in progress for this state: it was started in another browser, or more than 10 minutes ago.');
   }
   delete req.session.oidcPending[req.query.state];
+  if (pending.purpose === 'plover') return finishOidcStepUp(req, res, pending);
 
   let user;
   try {
@@ -456,6 +470,162 @@ app.get('/oidc/frontchannel-logout', async (req, res) => {
     console.log(`OIDC front-channel logout for sid ${sid}: ${n} session(s) ended`);
   }
   res.set('Cache-Control', 'no-store').type('text').send(n ? 'Signed out.' : 'No matching session.');
+});
+
+// ---------- partner site: sign in again, then Plover Trip ----------
+
+// Before leaving for Plover Trip the customer confirms it's them where they signed in, at Keycloak:
+// - with STEP_UP_ACR (OIDC: essential acr claim) or STEP_UP_SAML_ACR (SAML: RequestedAuthnContext),
+//   Keycloak step-up: the app asks for that level of authentication and Keycloak asks only for
+//   what it adds, the OTP. The response's acr shows the level was reached; that the OTP is asked
+//   every time is the level's Max Age (0) in the realm, which the response doesn't show.
+// - without it, a full sign-in again (OIDC prompt=login + max_age=0, SAML ForceAuthn): password,
+//   then the OTP when the realm requires it.
+// Legacy customers never signed in at Keycloak: they re-enter their old password here.
+const STEP_UP_RELAY = 'plover.';
+// Clock difference allowed between Keycloak and this app when checking the new sign-in's time.
+const STEP_UP_SKEW_MS = 30 * 1000;
+const STEP_UP_TICKET_TTL_MS = 2 * 60 * 1000;
+const LEGACY_MAX_FAILURES = 5;
+const LEGACY_LOCK_MS = 5 * 60 * 1000;
+
+function requireCustomer(req, res, next) {
+  if (req.user) return next();
+  setFlash(req, 'warn', 'Sign in first to visit our partners.');
+  res.redirect('/');
+}
+
+function stepUpFailed(req, res, reason) {
+  delete req.session.stepUp;
+  console.warn(`Plover Trip re-authentication failed: ${reason}`);
+  setFlash(req, 'bad', 'We couldn\'t confirm it\'s you, so you haven\'t left for Plover Trip.', [reason]);
+  res.redirect('/');
+}
+
+function leaveForPlover(req, res, who) {
+  delete req.session.stepUp;
+  console.log(`Re-authenticated ${who}: leaving for Plover Trip`);
+  res.redirect(303, PLOVER_URL);
+}
+
+app.get('/plover', requireCustomer, async (req, res) => {
+  const { user } = req;
+  if (user.protocol === 'legacy') return render(req, res, ploverReauthPage, {});
+  if (!isConfigured(user.protocol)) return stepUpFailed(req, res, 'Keycloak sign-in is no longer set up for this app.');
+  if (isOidcUser(user)) {
+    try {
+      const { acr } = config.stepUp;
+      const loginHint = user.username ?? undefined;
+      const { url, pending } = await oidc.startSignIn(active.oidc, acr ? { acr, loginHint } : { prompt: 'login', maxAge: 0, loginHint });
+      keepPending(req, { ...pending, purpose: 'plover', acr });
+      return res.redirect(url);
+    } catch (err) {
+      return stepUpFailed(req, res, oidc.describeError(err));
+    }
+  }
+  // SAML: the ACS may get the response without our cookie (a cross-site POST), so the nonce
+  // travels in RelayState and is matched against the session at /plover/return.
+  req.session.stepUp = { nonce: crypto.randomBytes(16).toString('base64url'), startedAt: Date.now(), acr: config.stepUp.samlAcr };
+  res.redirect(`/plover/saml?RelayState=${STEP_UP_RELAY}${req.session.stepUp.nonce}`);
+});
+
+// passport-saml takes RelayState from the query string.
+app.get('/plover/saml', requireCustomer, (req, res, next) => passport.authenticate('saml-stepup')(req, res, next));
+
+const acrMissed = (got, wanted) => `Keycloak didn't confirm your one-time code (authentication level ${got ?? 'not stated'}, needed ${wanted}).`;
+
+async function finishOidcStepUp(req, res, pending) {
+  if (!isOidcUser(req.user)) return stepUpFailed(req, res, 'You were signed out before confirming.');
+  let fresh;
+  try {
+    fresh = await oidc.finishSignIn(active.oidc, new URL(req.originalUrl, active.baseUrl), pending);
+  } catch (err) {
+    return stepUpFailed(req, res, oidc.describeError(err));
+  }
+  if (fresh.issuer !== req.user.issuer || fresh.subject !== req.user.subject) {
+    return stepUpFailed(req, res, `You signed in as ${fresh.username || fresh.subject}, not ${req.user.username || req.user.subject}.`);
+  }
+  const authTime = fresh.claims.auth_time;
+  if (pending.acr) {
+    if (fresh.claims.acr !== pending.acr) return stepUpFailed(req, res, acrMissed(fresh.claims.acr, pending.acr));
+  } else if (typeof authTime !== 'number' || authTime * 1000 < pending.startedAt - STEP_UP_SKEW_MS) {
+    return stepUpFailed(req, res, 'Keycloak didn\'t ask you to sign in again (the ID token has no new auth_time).');
+  }
+  leaveForPlover(req, res, req.user.username || req.user.subject);
+}
+
+// SAML responses to a re-authentication, by one-time ticket, until /plover/return reads them.
+const stepUpTickets = new Map();
+
+function samlStepUpReturn(res, err, user, nonce) {
+  for (const [k, t] of stepUpTickets) if (Date.now() - t.createdAt > STEP_UP_TICKET_TTL_MS) stepUpTickets.delete(k);
+  const ticket = crypto.randomBytes(24).toString('base64url');
+  stepUpTickets.set(ticket, {
+    nonce,
+    createdAt: Date.now(),
+    error: err || !user ? err?.message || 'No user returned' : null,
+    user: user && {
+      nameID: user.nameID,
+      nameIDFormat: user.nameIDFormat,
+      issuer: user.issuer,
+      email: user.email,
+      inResponseTo: user.inResponseTo,
+      authnInstant: user.assertionXml.match(/AuthnInstant="([^"]+)"/)?.[1] ?? null,
+      acr: user.assertionXml.match(/AuthnContextClassRef>\s*([^<\s]+)\s*</)?.[1] ?? null,
+    },
+  });
+  res.redirect(303, `/plover/return?ticket=${ticket}`);
+}
+
+const TRANSIENT = 'urn:oasis:names:tc:SAML:2.0:nameid-format:transient';
+
+// The same customer: the Name ID, or the email when the Name ID is transient (new on every sign-in).
+function sameSamlUser(a, b) {
+  if (a.issuer !== b.issuer) return false;
+  if (a.nameIDFormat === TRANSIENT || b.nameIDFormat === TRANSIENT) return Boolean(a.email) && a.email === b.email;
+  return a.nameID === b.nameID;
+}
+
+app.get('/plover/return', requireCustomer, (req, res) => {
+  const key = String(req.query.ticket ?? '');
+  const ticket = stepUpTickets.get(key);
+  stepUpTickets.delete(key);
+  const { stepUp } = req.session;
+  if (!ticket || Date.now() - ticket.createdAt > STEP_UP_TICKET_TTL_MS) return stepUpFailed(req, res, 'This confirmation has expired or was already used.');
+  if (!stepUp || ticket.nonce !== stepUp.nonce || Date.now() - stepUp.startedAt > REQUEST_TTL_MS) {
+    return stepUpFailed(req, res, 'This confirmation wasn\'t started in this browser, or was started more than 10 minutes ago.');
+  }
+  if (ticket.error) return stepUpFailed(req, res, ticket.error);
+  const { user } = ticket;
+  if (req.user.protocol !== 'saml' || !sameSamlUser(user, req.user)) {
+    return stepUpFailed(req, res, `You signed in as ${user.nameID}, not ${req.user.nameID}.`);
+  }
+  if (!user.inResponseTo) return stepUpFailed(req, res, 'Keycloak sent a sign-in this app didn\'t ask for.');
+  if (stepUp.acr) {
+    if (user.acr !== stepUp.acr) return stepUpFailed(req, res, acrMissed(user.acr, stepUp.acr));
+  } else if (user.authnInstant && Date.parse(user.authnInstant) < stepUp.startedAt - STEP_UP_SKEW_MS) {
+    return stepUpFailed(req, res, 'Keycloak didn\'t ask you to sign in again (the assertion\'s AuthnInstant is old).');
+  }
+  leaveForPlover(req, res, req.user.nameID);
+});
+
+// Legacy customers never signed in at Keycloak: they confirm with their old password.
+const legacyFailures = new Map();
+
+app.post('/plover/legacy', sameOrigin, requireCustomer, (req, res) => {
+  if (req.user.protocol !== 'legacy') return res.redirect('/plover');
+  const recent = (legacyFailures.get(req.user.id) ?? []).filter((t) => Date.now() - t < LEGACY_LOCK_MS);
+  legacyFailures.set(req.user.id, recent);
+  if (recent.length >= LEGACY_MAX_FAILURES) {
+    return render(req, res.status(429), ploverReauthPage, { locked: `${Math.ceil((LEGACY_LOCK_MS - (Date.now() - recent[0])) / 60000)} min` });
+  }
+  const checked = legacy.checkPassword(req.user.username, req.body.password);
+  if (checked?.id !== req.user.id) {
+    recent.push(Date.now());
+    return render(req, res.status(400), ploverReauthPage, { error: 'That password is incorrect.' });
+  }
+  legacyFailures.delete(req.user.id);
+  leaveForPlover(req, res, `legacy user ${req.user.username}`);
 });
 
 app.get('/saml/metadata', (req, res) => {

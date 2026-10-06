@@ -309,9 +309,52 @@ function dashboard({ user, profile, active }) {
   return `<div class="stack-lg">
     ${greeting(user, secondary)}
     ${accounts}
+    ${ploverCard}
     <div class="grid-2">${securityCard(user, active)}${profileCard(profile)}</div>
     ${developerPanel(user, active)}
   </div>`;
+}
+
+// ---------- partner site, after signing in again ----------
+
+export const PLOVER_URL = 'https://www.plovertrip.com/';
+
+const ploverCard = `<section aria-labelledby="partners-title">
+  <div class="section-title"><h2 class="display" id="partners-title">Partner offers</h2></div>
+  ${card({
+    iconHtml: `<span class="proto-icon gold">${icon('globe')}</span>`,
+    title: 'Plover Trip',
+    description: 'Plan and book your next trip with our travel partner.',
+    body: `<p class="small muted">For your security, you'll confirm it's you at our secure sign-in page, with your one-time code, before you leave ${BANK}.</p>`,
+    foot: `<a class="btn primary" href="/plover">${icon('external')}Go to Plover Trip</a>`,
+  })}
+</section>`;
+
+// Legacy customers have no Keycloak sign-in to repeat: they confirm with their old password.
+export function ploverReauthPage(data) {
+  const { user, error, locked } = data;
+  const form = locked
+    ? alert('bad', 'Too many incorrect passwords', [`Try again in ${esc(locked)}.`])
+    : `<form method="post" action="/plover/legacy" class="stack">
+        <div class="login-who"><span class="avatar">${esc(initials(user.username))}</span><code>${esc(user.username)}</code></div>
+        <div class="field${error ? ' invalid' : ''}"><label for="f-password">Password</label>
+          <input id="f-password" name="password" type="password" class="input" autocomplete="current-password" required autofocus${error ? ' aria-invalid="true" aria-describedby="f-password-error"' : ''}>
+          ${error ? `<p class="error" id="f-password-error">${icon('bad')}<span>${esc(error)}</span></p>` : ''}</div>
+        <button class="btn primary lg block">${icon('shieldCheck')}Confirm and continue to Plover Trip</button>
+      </form>`;
+  return bankLayout({
+    ...data,
+    title: 'Confirm it\'s you',
+    body: `<div class="narrow">
+      <a class="back-link" href="/">${icon('back')}Back to your accounts</a>
+      <section class="signin-card" aria-labelledby="reauth-title">
+        <div><span class="eyebrow dark">Extra security</span>
+          <h2 class="display" id="reauth-title">Confirm it's you</h2></div>
+        <p>You're leaving ${BANK} for our partner Plover Trip. Enter your password to continue.</p>
+        ${form}
+      </section>
+    </div>`,
+  });
 }
 
 // Why account upgrades are off, in admin terms: tucked away so customers aren't shown config jargon.
@@ -331,6 +374,7 @@ function legacyDashboard({ user }) {
     ${outcome ? alert(kind, esc(outcome.title), [esc(outcome.message)]) : ''}
     ${outcome?.adminDetail?.length ? adminWhy(outcome.adminDetail) : ''}
     ${accounts}
+    ${ploverCard}
     <div class="grid-2">
       ${card({
         iconHtml: `<span class="proto-icon legacy">${icon('key')}</span>`,
